@@ -76,7 +76,7 @@ function modeDetails(snapshot: ResearchCoreSnapshot): string[] {
       return [
         snapshot.state.experiment?.intent.replace(/-/g, " ") ?? "experiment",
         count(snapshot.roundActions, "action"),
-        count(snapshot.state.artifacts.length, "output"),
+        count(snapshot.artifactCount ?? snapshot.state.artifacts.length, "output"),
       ];
   }
 }

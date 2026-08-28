@@ -1,10 +1,11 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Text } from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { basename, extname, relative, resolve, sep } from "node:path";
 import { Type } from "typebox";
-import { loadArtifactPreview, resolveArtifactRecord, type ArtifactRecord } from "./artifacts.js";
+import { resolveArtifactRecord, type ArtifactRecord } from "./artifacts.js";
 import { formatSshPortForwardCommand } from "./checkpoint-server.js";
 import {
   validateCheckpointDraft,
@@ -132,7 +133,6 @@ export function registerResearchCheckpoint(
       let artifacts: PreparedCheckpointArtifact[];
       try {
         artifacts = await prepareCheckpointArtifacts(
-          pi,
           ctx,
           dependencies.getArtifacts(),
           params.artifacts as CheckpointArtifactInput[] | undefined,
@@ -183,16 +183,15 @@ export function registerResearchCheckpoint(
     renderCall(_args, theme) {
       return new Text(theme.fg("toolTitle", theme.bold("Research Checkpoint")), 0, 0);
     },
-    renderResult(result, _options, theme) {
+    renderResult(result, { expanded }, theme) {
       const details = result.details as CheckpointToolDetails | undefined;
       if (!details) return new Text("Research checkpoint reached.", 0, 0);
-      return renderCheckpointResult(details, theme);
+      return renderCheckpointResult(details, theme, expanded);
     },
   });
 }
 
 async function prepareCheckpointArtifacts(
-  pi: ExtensionAPI,
   ctx: ExtensionContext,
   discovered: ArtifactRecord[],
   requested: CheckpointArtifactInput[] | undefined,
@@ -214,16 +213,7 @@ async function prepareCheckpointArtifacts(
       throw new Error(`Artifact must stay inside the project: ${item.path}`);
     }
     const artifact = discovered.find((candidate) => resolve(ctx.cwd, candidate.path) === absolutePath) ?? resolvedRecord;
-    const result: PreparedCheckpointArtifact = { ...item, artifact, absolutePath };
-    if (artifact.kind === "file" && [".png", ".jpg", ".jpeg"].includes(artifact.extension)) {
-      try {
-        const preview = await loadArtifactPreview(pi, ctx.cwd, artifact, item.columns);
-        result.image = preview.image;
-      } catch {
-        // The persistent Markdown reference remains authoritative without a terminal preview.
-      }
-    }
-    prepared.push(result);
+    prepared.push({ ...item, artifact, absolutePath });
   }
   return prepared;
 }
@@ -249,21 +239,26 @@ async function resolveCheckpointArtifactRecord(cwd: string, inputPath: string): 
   }
 }
 
-function renderCheckpointResult(details: CheckpointToolDetails, theme: Theme): Container {
+function renderCheckpointResult(details: CheckpointToolDetails, theme: Theme, expanded: boolean): Container {
   const container = new Container();
   container.addChild(new Text(theme.fg("success", theme.bold("✓ Experiment completed\n✓ Checkpoint generated")), 0, 0));
   container.addChild(new Text(theme.bold(details.draft.title), 0, 1));
   container.addChild(new Text(details.draft.shortConclusion, 0, 0));
-  details.artifacts.filter((item) => item.image && item.role === "evidence").forEach((item) => {
-    container.addChild(new Text(`${theme.bold(item.title)}\n${item.description}`, 0, 1));
-    container.addChild(
-      createTerminalImage(
-        item.image!.data,
-        item.image!.mimeType,
-        { fallbackColor: (value) => theme.fg("muted", value) },
-        { maxWidthCells: 72, maxHeightCells: 24, filename: item.artifact.name, chafaFormat: "sixels" },
-      ),
-    );
+  if (expanded) details.artifacts.filter((item) => item.role === "evidence" && checkpointImageMime(item.artifact.extension)).forEach((item) => {
+    try {
+      const data = readFileSync(item.absolutePath).toString("base64");
+      container.addChild(new Text(`${theme.bold(item.title)}\n${item.description}`, 0, 1));
+      container.addChild(
+        createTerminalImage(
+          data,
+          checkpointImageMime(item.artifact.extension)!,
+          { fallbackColor: (value) => theme.fg("muted", value) },
+          { maxWidthCells: 72, maxHeightCells: 24, filename: item.artifact.name, chafaFormat: "sixels" },
+        ),
+      );
+    } catch {
+      // The persistent Markdown and Viewer remain authoritative when a historical image is unavailable.
+    }
   });
   container.addChild(new Text(`${theme.fg("muted", "Saved")} ${details.stored.relativeMarkdownPath}`, 0, 1));
   if (details.viewerUrl) {
@@ -277,6 +272,14 @@ function renderCheckpointResult(details: CheckpointToolDetails, theme: Theme): C
     );
   }
   return container;
+}
+
+function checkpointImageMime(extension: string): string | undefined {
+  return ({
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+  } as Record<string, string>)[extension.toLowerCase()];
 }
 
 function failure(text: string) {

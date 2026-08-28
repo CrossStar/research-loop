@@ -8,6 +8,7 @@ export interface ExperimentContext {
   intent: ExperimentIntent;
   plannedDataScope: string;
   reference?: string;
+  artifactRoots?: string[];
 }
 
 export type ArtifactKind = "file" | "dataset";
@@ -30,8 +31,13 @@ export interface ResearchState {
   workMode: WorkMode;
   objective?: string;
   experiment?: ExperimentContext;
+  /** Small, durable paths used to rediscover artifacts; safe to persist in session entries. */
+  artifactRoots: string[];
+  /** Ephemeral inventory. Pi rebuilds this from artifactRoots instead of persisting it in session JSONL. */
   artifacts: ArtifactMetadata[];
 }
+
+export type ResearchControlState = Omit<ResearchState, "artifacts">;
 
 export type ApprovalKind = "protocol-deviation";
 

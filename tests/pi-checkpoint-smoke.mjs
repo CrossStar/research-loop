@@ -106,6 +106,7 @@ try {
   assert.match(text, /http:\/\/127\.0\.0\.1:43119\/latest/);
   assert.match(text, /-L 43119:127\.0\.0\.1:43119/);
   assert.match(text, / moon$/);
+  assert.equal(JSON.stringify(result.details).includes('"image"'), false);
   assert.equal(notifications.length, 0);
 } finally {
   delete process.env.RESEARCH_LOOP_SSH_HOST;

@@ -208,6 +208,9 @@ Viewer 使用内联 SVG 动态绘制，并把正式图题放在图下方；Markd
 
 ## Viewer Server
 
+Viewer 不参与 `session_start`。首次保存 Checkpoint 或调用 `/checkpoint-viewer` 时按需启动，因此
+恢复不需要网页查看的旧 session 时不会读取模板或绑定端口。
+
 Viewer 默认绑定 `127.0.0.1`，从 `43119` 开始寻找空闲端口：
 
 ```text

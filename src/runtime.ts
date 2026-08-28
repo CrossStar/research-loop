@@ -36,11 +36,15 @@ const PI_EXPERIMENT_CODE_GUIDANCE = [
   "Use names that express research meaning. Comments should explain why a split, metric, layer, control, fixed variable, or protocol deviation exists; do not translate obvious code into comments.",
   "Separate model loading, data preparation, conditions, analysis, and plotting only when they are naturally distinct. Avoid factories, registries, strategy/context hierarchies, tiny wrapper chains, and reusable frameworks until multiple real experiments need them.",
   "Avoid broad defensive layers, retries, compatibility shims, silent recovery, repeated existence checks, and large try/except shells. Add only checks that prevent expensive wasted work or misleading results.",
-  "Save scientific artifacts once under a stable predictable run directory, with names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
+  "Save scientific artifacts once under a stable predictable run directory, declare known project-relative output directories in research_mode artifactRoots, and use names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
   "End the run with a compact Rich result table and a labeled list of exact saved paths so the researcher can judge the result and start the next iteration immediately.",
 ].join("\n");
 
 export type { ResearchState, ToolGateDecision } from "./core/types.js";
+
+export interface SessionRestoreResult {
+  embeddedArtifacts: boolean;
+}
 
 export function shouldAbortForCancelledQuestionnaire(toolName: string, details: unknown): boolean {
   if (toolName !== ASK_USER_QUESTION_TOOL || !details || typeof details !== "object") return false;
@@ -72,16 +76,22 @@ export class ResearchRuntime {
     return this.core.artifacts;
   }
 
-  startSession(ctx: ExtensionContext): void {
+  get artifactRoots(): string[] {
+    return this.core.artifactRoots;
+  }
+
+  get currentArtifactRoots(): string[] {
+    return this.core.experiment?.artifactRoots ?? [];
+  }
+
+  startSession(ctx: ExtensionContext): SessionRestoreResult {
     this.blockedToolAttempts.clear();
     this.userDecisionPending = false;
-    const latest = ctx.sessionManager
-      .getBranch()
-      .filter((entry) => entry.type === "custom" && entry.customType === STATE_ENTRY)
-      .at(-1) as { data?: Partial<ResearchState> } | undefined;
-    this.core.restoreState(latest?.data ?? {});
+    const latest = findLatestResearchState(ctx);
+    this.core.restoreState(latest ?? {});
     this.setToolAvailability();
     this.renderStatus(ctx);
+    return { embeddedArtifacts: Boolean(latest && Object.hasOwn(latest, "artifacts")) };
   }
 
   setEnabled(enabled: boolean, ctx: ExtensionContext): void {
@@ -121,8 +131,24 @@ export class ResearchRuntime {
 
   setArtifacts(artifacts: ArtifactRecord[], ctx?: ExtensionContext): void {
     this.core.setArtifacts(artifacts);
-    this.persist();
     if (ctx) this.renderStatus(ctx);
+  }
+
+  upsertArtifact(artifact: ArtifactRecord, ctx?: ExtensionContext): void {
+    this.core.upsertArtifact(artifact);
+    if (ctx) this.renderStatus(ctx);
+  }
+
+  addArtifactRoots(roots: string[], ctx?: ExtensionContext, persist = true): boolean {
+    const changed = this.core.addArtifactRoots(roots);
+    if (!changed) return false;
+    if (persist) this.persist();
+    if (ctx) this.renderStatus(ctx);
+    return true;
+  }
+
+  persistControlState(): void {
+    this.persist();
   }
 
   resetRequest(prompt: string, ctx: ExtensionContext): void {
@@ -224,7 +250,7 @@ export class ResearchRuntime {
     ctx.ui.setWidget("research-loop-status", undefined);
     ctx.ui.setStatus(
       "research-loop",
-      renderPiResearchStatus(this.core.snapshot(), ctx.ui.theme, this.userDecisionPending),
+      renderPiResearchStatus(this.core.snapshot(false), ctx.ui.theme, this.userDecisionPending),
     );
   }
 
@@ -235,7 +261,7 @@ export class ResearchRuntime {
   }
 
   private persist(): void {
-    this.pi.appendEntry(STATE_ENTRY, this.core.researchState satisfies ResearchState);
+    this.pi.appendEntry(STATE_ENTRY, this.core.controlState);
   }
 
   private setToolAvailability(): void {
@@ -250,6 +276,19 @@ export class ResearchRuntime {
     }
     this.pi.setActiveTools(active);
   }
+}
+
+function findLatestResearchState(ctx: ExtensionContext): Partial<ResearchState> | undefined {
+  let entry = ctx.sessionManager.getLeafEntry();
+  while (entry) {
+    if (entry.type === "custom" && entry.customType === STATE_ENTRY) {
+      return entry.data && typeof entry.data === "object"
+        ? entry.data as Partial<ResearchState>
+        : undefined;
+    }
+    entry = entry.parentId ? ctx.sessionManager.getEntry(entry.parentId) : undefined;
+  }
+  return undefined;
 }
 
 function toolFingerprint(toolName: string, input: unknown): string {

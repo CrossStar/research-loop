@@ -43,7 +43,10 @@ const theme = { fg: (_color, text) => text };
 const ctx = {
   hasUI: true,
   abort() { abortCount += 1; },
-  sessionManager: { getBranch: () => [] },
+  sessionManager: {
+    getLeafEntry: () => undefined,
+    getEntry: () => undefined,
+  },
   ui: {
     theme,
     async confirm(title, message) {
@@ -75,6 +78,27 @@ assert.doesNotMatch(runtime.policy(), /ask_user_question is available/);
 activeTools.push("ask_user_question");
 assert.match(notifications.at(-1).message, /Research Loop: ON/);
 assert.equal(entries.at(-1).customType, "research-loop-state");
+assert.equal(Object.hasOwn(entries.at(-1).data, "artifacts"), false);
+assert.deepEqual(entries.at(-1).data.artifactRoots, []);
+const stateEntryCount = entries.length;
+for (let index = 0; index < 1_000; index += 1) {
+  runtime.upsertArtifact({
+    kind: "file",
+    path: `runs/example/artifact-${index}.json`,
+    name: `artifact-${index}.json`,
+    extension: ".json",
+    size: 128,
+    mtimeMs: index,
+    discoveredAt: index,
+  }, ctx);
+}
+assert.equal(entries.length, stateEntryCount);
+assert.equal(runtime.artifacts.length, 1_000);
+runtime.addArtifactRoots(["runs/example"], ctx);
+assert.equal(entries.length, stateEntryCount + 1);
+assert.deepEqual(entries.at(-1).data.artifactRoots, ["runs/example"]);
+assert.equal(Object.hasOwn(entries.at(-1).data, "artifacts"), false);
+assert.equal(JSON.stringify(entries.at(-1)).length < 500, true);
 runtime.setUserDecisionPending(true, ctx);
 assert.match(statusCalls.at(-1).value, /waiting for decision/);
 runtime.setUserDecisionPending(false, ctx);
@@ -116,6 +140,7 @@ assert.match(experimentPolicy, /top-level main\(\) mirror the natural experiment
 assert.match(experimentPolicy, /must use Rich/);
 assert.match(experimentPolicy, /Use tqdm/);
 assert.match(experimentPolicy, /--quick or --smoke/);
+assert.match(experimentPolicy, /research_mode artifactRoots/);
 assert.match(experimentPolicy, /summary\.json, per_seed\.csv/);
 assert.match(experimentPolicy, /Avoid factories, registries, strategy\/context hierarchies/);
 activeTools = activeTools.filter((name) => name !== "ask_user_question");
@@ -137,5 +162,38 @@ assert.equal(abortCount, 1);
 runtime.clearStatus(ctx);
 assert.deepEqual(widgetCalls.at(-1), { id: "research-loop-status", value: undefined });
 assert.deepEqual(statusCalls.at(-1), { id: "research-loop", value: undefined });
+
+const legacyStateEntry = {
+  id: "state",
+  parentId: undefined,
+  type: "custom",
+  customType: "research-loop-state",
+  data: {
+    enabled: true,
+    workMode: "exploration",
+    artifacts: [{
+      kind: "file",
+      path: "runs/legacy/summary.json",
+      name: "summary.json",
+      extension: ".json",
+      size: 10,
+      mtimeMs: 1,
+      discoveredAt: 1,
+    }],
+  },
+};
+const leafEntry = { id: "leaf", parentId: "state", type: "message" };
+const restoredRuntime = new ResearchRuntime(pi);
+const restored = restoredRuntime.startSession({
+  ...ctx,
+  sessionManager: {
+    getLeafEntry: () => leafEntry,
+    getEntry: (id) => id === "state" ? legacyStateEntry : undefined,
+  },
+});
+assert.equal(restored.embeddedArtifacts, true);
+assert.equal(restoredRuntime.artifacts.length, 1);
+restoredRuntime.persistControlState();
+assert.equal(Object.hasOwn(entries.at(-1).data, "artifacts"), false);
 
 console.log("Pi runtime smoke test passed");

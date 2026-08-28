@@ -103,6 +103,7 @@ function experimentGuidance(experiment?: ExperimentContext): string {
         `Intent: ${experiment.intent}`,
         `Planned data: ${experiment.plannedDataScope}`,
         ...(experiment.reference ? [`Reference: ${experiment.reference}`] : []),
+        ...(experiment.artifactRoots?.length ? [`Artifact roots: ${experiment.artifactRoots.join(", ")}`] : []),
       ].join("\n")
     : "";
   const reproduction = experiment?.intent === "reproduction"

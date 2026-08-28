@@ -30,13 +30,24 @@ export class ResearchCore {
         return this.terminalToolAccepted;
     }
     get experiment() {
-        return this.state.experiment ? { ...this.state.experiment } : undefined;
+        return this.state.experiment ? cloneExperiment(this.state.experiment) : undefined;
+    }
+    get artifactRoots() {
+        return [...this.state.artifactRoots];
     }
     get artifacts() {
         return this.state.artifacts.map((artifact) => ({ ...artifact }));
     }
     get researchState() {
         return cloneState(this.state);
+    }
+    get controlState() {
+        const { artifacts: _artifacts, ...control } = this.state;
+        return {
+            ...control,
+            experiment: control.experiment ? cloneExperiment(control.experiment) : undefined,
+            artifactRoots: [...control.artifactRoots],
+        };
     }
     setEnabled(enabled) {
         this.state.enabled = enabled;
@@ -61,7 +72,9 @@ export class ResearchCore {
         }
         this.state.workMode = mode;
         this.state.objective = objective;
-        this.state.experiment = mode === "experiment" ? { ...experiment } : undefined;
+        this.state.experiment = mode === "experiment" ? cloneExperiment(experiment) : undefined;
+        if (mode === "experiment")
+            this.addArtifactRoots(experiment.artifactRoots ?? []);
         this.resetRound();
         return { block: false };
     }
@@ -92,6 +105,25 @@ export class ResearchCore {
             this.state.artifacts[index] = { ...artifact };
         else
             this.state.artifacts.push({ ...artifact });
+    }
+    addArtifactRoots(roots) {
+        const compacted = compactArtifactRoots([...this.state.artifactRoots, ...roots]);
+        const stateChanged = compacted.length !== this.state.artifactRoots.length
+            || compacted.some((root, index) => root !== this.state.artifactRoots[index]);
+        if (stateChanged)
+            this.state.artifactRoots = compacted;
+        let experimentChanged = false;
+        if (this.state.workMode === "experiment" && this.state.experiment) {
+            const experimentRoots = compactArtifactRoots([
+                ...(this.state.experiment.artifactRoots ?? []),
+                ...roots,
+            ]);
+            experimentChanged = experimentRoots.length !== (this.state.experiment.artifactRoots?.length ?? 0)
+                || experimentRoots.some((root, index) => root !== this.state.experiment.artifactRoots?.[index]);
+            if (experimentChanged)
+                this.state.experiment.artifactRoots = experimentRoots;
+        }
+        return stateChanged || experimentChanged;
     }
     resetRequest(prompt) {
         this.currentUserPrompt = prompt;
@@ -204,10 +236,10 @@ export class ResearchCore {
                     : "accent",
         };
     }
-    snapshot() {
+    snapshot(includeArtifacts = true) {
         return {
             schemaVersion: 1,
-            state: cloneState(this.state),
+            state: includeArtifacts ? cloneState(this.state) : { ...this.controlState, artifacts: [] },
             roundActions: this.roundActions,
             nextSoftReviewAt: this.nextSoftReviewAt,
             softReviewPending: this.softReviewPending,
@@ -216,6 +248,7 @@ export class ResearchCore {
             toolCallsThisTurn: this.toolCallsThisTurn,
             terminalToolAccepted: this.terminalToolAccepted,
             currentUserPrompt: this.currentUserPrompt,
+            artifactCount: this.state.artifacts.length,
         };
     }
     restoreState(state) {
@@ -225,7 +258,8 @@ export class ResearchCore {
             enabled: state.enabled ?? false,
             workMode: mode,
             objective: state.objective,
-            experiment: mode === "experiment" ? state.experiment : undefined,
+            experiment: mode === "experiment" && state.experiment ? cloneExperiment(state.experiment) : undefined,
+            artifactRoots: compactArtifactRoots(Array.isArray(state.artifactRoots) ? state.artifactRoots : []),
             artifacts: Array.isArray(state.artifacts)
                 ? state.artifacts.map((artifact) => ({ ...artifact }))
                 : [],
@@ -301,14 +335,39 @@ function extractCommand(input) {
     return typeof command === "string" ? command : "";
 }
 function defaultState() {
-    return { enabled: false, workMode: "exploration", artifacts: [] };
+    return { enabled: false, workMode: "exploration", artifactRoots: [], artifacts: [] };
 }
 function cloneState(state) {
     return {
         ...state,
-        experiment: state.experiment ? { ...state.experiment } : undefined,
+        experiment: state.experiment ? cloneExperiment(state.experiment) : undefined,
+        artifactRoots: [...state.artifactRoots],
         artifacts: state.artifacts.map((artifact) => ({ ...artifact })),
     };
+}
+function cloneExperiment(experiment) {
+    return {
+        ...experiment,
+        artifactRoots: experiment.artifactRoots ? [...experiment.artifactRoots] : undefined,
+    };
+}
+function compactArtifactRoots(roots) {
+    const normalized = [...new Set(roots
+            .filter((root) => typeof root === "string")
+            .map((root) => root.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, ""))
+            .filter((root) => Boolean(root)
+            && root !== ".."
+            && !root.startsWith("../")
+            && !root.startsWith("/")
+            && !/^[A-Za-z]:\//.test(root)))]
+        .sort((a, b) => a.length - b.length || a.localeCompare(b));
+    const compacted = [];
+    for (const root of normalized) {
+        if (compacted.some((parent) => parent === "." || root === parent || root.startsWith(`${parent}/`)))
+            continue;
+        compacted.push(root);
+    }
+    return compacted;
 }
 function nonNegativeInteger(value, fallback) {
     return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback;

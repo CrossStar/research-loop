@@ -135,7 +135,8 @@ results/
 ```
 
 科研 artifact，如 CSV、JSON、PNG、checkpoint、prediction 和 activation，保存一次并保留原始位置。
-终端展示不产生额外文件，Checkpoint 不复制已有 artifact。
+终端展示不产生额外文件，Checkpoint 不复制已有 artifact。输出目录在运行前已知时，应通过 Pi
+`research_mode` 的 `artifactRoots` 声明项目相对 run directory，让 Radar 只监听并恢复这些范围。
 
 实验结束时使用简洁 Rich table 汇总主要 condition 和 metric，并列出准确路径：
 

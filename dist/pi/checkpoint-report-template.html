@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Checkpoint Viewer</title>
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [["\\(", "\\)"]],
+        displayMath: [["\\[", "\\]"]],
+        processEscapes: true
+      },
+      svg: { fontCache: "global" },
+      options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+  <style>
+    @font-face {
+      font-family: "TeX Main";
+      src: url("https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/fonts/KaTeX_Main-Regular.woff2") format("woff2");
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "TeX Main";
+      src: url("https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/fonts/KaTeX_Main-Bold.woff2") format("woff2");
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "TeX Main";
+      src: url("https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/fonts/KaTeX_Main-Italic.woff2") format("woff2");
+      font-style: italic;
+      font-weight: 400;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "TeX Mono";
+      src: url("https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/fonts/KaTeX_Typewriter-Regular.woff2") format("woff2");
+      font-display: swap;
+    }
+
+    :root {
+      --canvas: #f1f1ef;
+      --paper: #fff;
+      --paper-soft: #fafaf7;
+      --ink: #353535;
+      --strong: #202020;
+      --muted: #5d5d5d;
+      --faint: #888;
+      --rule: #d2d2ce;
+      --rule-strong: #777;
+      --accent: #1d4d7a;
+      --accent-soft: #edf4f8;
+      --green: #2f6546;
+      --amber: #79571c;
+      --red: #963737;
+      --font-body: "TeX Main", SimSun, "宋体", STSong, "Songti SC", "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "思源宋体", serif;
+      --font-ui: "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Source Han Serif CN", "思源宋体 CN", "思源宋体", "TeX Main", serif;
+      --font-mono: "Maple Mono", "Maple Mono NF", "Maple Mono CN", "Maple Mono NF CN", "TeX Mono", "Cascadia Mono", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); color-scheme: light; scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+      font: 18px/1.72 var(--font-body);
+      font-weight: 400;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    strong, b { font-weight: 500; }
+    ::selection { background: #dbe8f2; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+    .checkpoint-viewer {
+      width: min(1580px, calc(100% - 44px));
+      margin: 28px auto 64px;
+      display: grid;
+      grid-template-columns: minmax(0, 1180px) 250px;
+      gap: 62px;
+      align-items: start;
+    }
+    .paper {
+      min-height: calc(100vh - 56px);
+      padding: 68px 86px 80px;
+      background: var(--paper);
+      box-shadow: 0 1px 8px rgba(0,0,0,.08);
+    }
+    .sidebar {
+      position: sticky;
+      top: 28px;
+      max-height: calc(100vh - 56px);
+      overflow: auto;
+      padding: 18px 0 30px 22px;
+      border-left: 1px solid #bdbdbd;
+      scrollbar-width: thin;
+    }
+    .brand { padding-bottom: 14px; border-bottom: 1px solid #999; }
+    .brand-title { color: var(--strong); font-size: 20px; font-weight: 400; line-height: 1.2; }
+    .brand-subtitle { margin-top: 4px; color: var(--muted); font-size: 13px; font-style: italic; }
+    .viewer-links { display: flex; gap: 14px; margin-top: 13px; font-size: 13px; }
+    .side-heading { margin: 26px 0 8px; color: var(--strong); font-size: 15px; font-weight: 400; }
+    .side-nav { display: grid; }
+    .side-nav a {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      padding: 4px 0;
+      color: #555;
+      font-size: 13.5px;
+      line-height: 1.35;
+      text-decoration: none;
+    }
+    .side-nav a.subsection { padding-left: 13px; font-size: 12.5px; }
+    .side-nav a:hover, .side-nav a.active { color: var(--strong); text-decoration: underline; }
+    .side-nav time { color: var(--faint); font: 11px var(--font-mono); }
+    .session-note { margin-top: 28px; padding-top: 12px; color: var(--faint); border-top: 1px solid var(--rule); font-size: 12px; }
+
+    .viewer-toolbar { display: flex; justify-content: flex-end; gap: 16px; margin: -42px 0 26px; }
+    .quiet-button {
+      padding: 1px 0;
+      color: var(--muted);
+      border: 0;
+      border-bottom: 1px solid var(--rule-strong);
+      background: transparent;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .quiet-button:hover { color: var(--accent); border-color: var(--accent); }
+    .loading, .empty-state { padding: 80px 0; color: var(--muted); text-align: center; }
+    .error-state { padding: 30px; color: var(--red); border: 1px solid var(--red); }
+
+    .checkpoint-meta {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 6px 18px;
+      margin: -16px auto 28px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .checkpoint-meta span { min-width: 0; overflow-wrap: anywhere; }
+    .checkpoint-meta span + span::before { content: "·"; margin-right: 18px; color: var(--faint); }
+    .checkpoint-lead {
+      margin: 0 0 42px;
+      padding: 15px 18px;
+      border-top: 1px solid var(--strong);
+      border-bottom: 1px solid var(--strong);
+      background: var(--paper-soft);
+      font-size: 17px;
+    }
+    .checkpoint-lead strong { margin-right: 8px; font-weight: 500; }
+
+    .markdown-body { counter-reset: note-section; }
+    .markdown-body > h1 {
+      max-width: 940px;
+      margin: 0 auto 34px;
+      color: var(--strong);
+      font-size: clamp(37px, 4.3vw, 54px);
+      line-height: 1.12;
+      text-align: center;
+      font-weight: 400;
+      letter-spacing: -.018em;
+    }
+    .markdown-body h2 {
+      margin: 58px 0 22px;
+      padding-top: 2px;
+      color: var(--strong);
+      font-size: 29px;
+      font-weight: 400;
+      line-height: 1.24;
+    }
+    .markdown-body h3 { margin: 36px 0 14px; color: var(--strong); font-size: 21px; font-weight: 400; line-height: 1.35; }
+    .markdown-body h3.table-title { margin: 34px 0 10px; font-size: 16px; text-align: center; }
+    .markdown-body h3.table-title + table { margin-top: 0; }
+    .markdown-body h4 { margin: 28px 0 10px; font-size: 18px; font-weight: 400; }
+    .markdown-body p { margin: 0 0 18px; text-align: justify; overflow-wrap: anywhere; }
+    .markdown-body > hr { margin: 50px 0 0; border: 0; border-top: 1px solid var(--rule); }
+    .markdown-body strong { color: var(--strong); font-weight: 500; }
+    .markdown-body blockquote {
+      margin: 24px 0;
+      padding: 11px 20px;
+      color: var(--ink);
+      border-left: 3px solid var(--strong);
+      background: var(--paper-soft);
+    }
+    .markdown-body blockquote p:last-child { margin-bottom: 0; }
+    .markdown-body ul, .markdown-body ol { margin: 10px 0 20px; padding-left: 28px; }
+    .markdown-body li { margin: 5px 0; }
+    .markdown-body code {
+      padding: .08em .28em;
+      color: #25344b;
+      background: #f1f2f2;
+      font: .82em/1.5 var(--font-mono);
+    }
+    .markdown-body pre {
+      max-height: 620px;
+      overflow: auto;
+      margin: 20px 0;
+      padding: 15px 17px;
+      color: #282b30;
+      border: 1px solid #c8c8c3;
+      background: #f8f8f5;
+      font: 13.5px/1.65 var(--font-mono);
+    }
+    .markdown-body pre code { padding: 0; background: transparent; font: inherit; }
+    .raw-html { white-space: pre-wrap; }
+
+    .markdown-body table {
+      width: 100%;
+      margin: 24px 0 36px;
+      border-collapse: collapse;
+      border-top: 2px solid var(--strong);
+      border-bottom: 2px solid var(--strong);
+      font-size: 15px;
+      font-variant-numeric: tabular-nums;
+    }
+    .markdown-body th { padding: 9px 11px; border-bottom: 1px solid var(--strong); font-weight: 500; text-align: left; }
+    .markdown-body td { padding: 9px 11px; border-top: 1px solid #e5e5e2; vertical-align: top; }
+    .markdown-body th[align="right"], .markdown-body td[align="right"] { text-align: right; }
+    .markdown-body th[align="center"], .markdown-body td[align="center"] { text-align: center; }
+
+    .checkpoint-figure { margin: 34px auto 38px; text-align: center; }
+    .checkpoint-figure img { display: block; max-width: 100%; max-height: 680px; margin: 0 auto; object-fit: contain; cursor: zoom-in; }
+    .checkpoint-figure figcaption { max-width: 820px; margin: 12px auto 0; color: var(--strong); font-size: 15px; font-weight: 400; line-height: 1.5; }
+    .broken-artifact { color: var(--red); }
+
+    .checkpoint-chart { margin: 32px 0 22px; padding: 0; }
+    .checkpoint-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .chart-caption { margin: 12px auto 0; color: var(--strong); font-size: 15px; font-weight: 400; line-height: 1.5; text-align: center; }
+    .chart-axis { stroke: #555; stroke-width: 1.2; }
+    .chart-grid { stroke: #ddd; stroke-width: 1; }
+    .chart-label { fill: #333; font: 13px var(--font-body); }
+    .chart-value { fill: #111; font: 12px var(--font-mono); }
+    .chart-error { color: var(--red); }
+
+    .artifact-inspector { margin: 12px 0 24px; border: 1px solid #bdbdb8; background: #fbfbf9; }
+    .artifact-inspector > summary { padding: 8px 11px; cursor: pointer; font-size: 14px; font-weight: 500; }
+    .artifact-preview { border-top: 1px solid #ccc; }
+    .preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 9px 11px; background: #f0f0ec; }
+    .preview-title { margin-right: auto; font: 12px var(--font-mono); }
+    .preview-stat { color: var(--faint); font: 11px var(--font-mono); }
+    .preview-action { padding: 2px 0; color: #444; border: 0; border-bottom: 1px solid #888; background: transparent; cursor: pointer; font-size: 12px; }
+    .preview-action.active { color: var(--accent); border-color: var(--accent); }
+    .preview-search { width: min(280px, 100%); padding: 6px 8px; border: 1px solid #aaa; background: #fff; font: 13px var(--font-mono); }
+    .preview-content { max-height: 650px; overflow: auto; padding: 13px 15px 17px; font: 13px/1.7 var(--font-mono); }
+    .json-tree details { margin-left: 17px; }
+    .json-tree > details { margin-left: 0; }
+    .json-tree summary { cursor: pointer; }
+    .json-key { color: #225d72; }
+    .json-string { color: #376b48; }
+    .json-number { color: #9a531d; }
+    .json-boolean { color: #695184; }
+    .json-null { color: #a63b46; font-style: italic; }
+    .json-shape { color: #929599; }
+    .json-row { margin-left: 17px; overflow-wrap: anywhere; }
+    .json-line { display: grid; grid-template-columns: 50px minmax(0, 1fr); min-height: 22px; }
+    .json-line-number { padding-right: 12px; color: #aaa; text-align: right; user-select: none; }
+    .json-line code { padding: 0; white-space: pre; background: transparent; }
+    mark { color: #222; background: #efe1a6; }
+    .preview-empty { padding: 30px; color: var(--faint); text-align: center; }
+    .csv-preview { width: max-content; min-width: 100%; margin: 0; border: 0; font-size: 12px; }
+
+    .history-header { margin-bottom: 48px; padding-bottom: 26px; border-bottom: 1px solid var(--strong); text-align: center; }
+    .history-header h1 { margin: 0 0 10px; font-size: 45px; font-weight: 400; }
+    .history-header p { margin: 0; color: var(--muted); }
+    .history-group { margin-top: 42px; }
+    .history-group h2 { margin: 0 0 9px; padding-bottom: 7px; border-bottom: 1px solid var(--strong); font-size: 22px; font-weight: 400; }
+    .history-list { list-style: none; margin: 0; padding: 0; }
+    .history-item { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 22px; padding: 17px 0; border-bottom: 1px solid var(--rule); }
+    .history-time { color: var(--faint); font: 12px var(--font-mono); }
+    .history-title { color: var(--strong); font-size: 19px; font-weight: 400; text-decoration: none; }
+    .history-title:hover { color: var(--accent); text-decoration: underline; }
+    .history-conclusion { margin-top: 4px; color: var(--muted); font-size: 15px; }
+
+    dialog { width: min(1200px, calc(100vw - 40px)); padding: 0; border: 1px solid #777; background: #fff; }
+    dialog::backdrop { background: rgba(20,20,18,.7); backdrop-filter: blur(2px); }
+    .dialog-head { display: flex; justify-content: space-between; padding: 9px 13px; border-bottom: 1px solid var(--rule); }
+    .dialog-image { display: block; width: 100%; max-height: calc(100vh - 100px); object-fit: contain; }
+
+    @media (max-width: 1320px) {
+      .checkpoint-viewer { width: min(1220px, calc(100% - 30px)); grid-template-columns: minmax(0, 930px) 220px; gap: 38px; }
+      .paper { padding-inline: 62px; }
+    }
+    @media (max-width: 900px) {
+      html, body { background: #fff; }
+      .checkpoint-viewer { width: 100%; margin: 0; display: flex; flex-direction: column; gap: 0; }
+      .sidebar { position: relative; order: 0; width: 100%; max-height: none; padding: 18px 25px; border: 0; border-bottom: 1px solid #999; }
+      .brand { padding: 0; border: 0; }
+      .brand-subtitle, .side-heading, .side-nav, .session-note { display: none; }
+      .viewer-links { position: absolute; top: 17px; right: 25px; margin: 0; }
+      .paper { order: 1; width: 100%; min-height: 0; padding: 50px 42px 64px; box-shadow: none; }
+      .viewer-toolbar { margin-top: -28px; }
+    }
+    @media (max-width: 640px) {
+      body { font-size: 17px; line-height: 1.62; }
+      .paper { padding: 42px 21px 55px; }
+      .markdown-body > h1 { font-size: 34px; }
+      .markdown-body h2 { margin-top: 46px; font-size: 25px; }
+      .markdown-body h3 { font-size: 20px; }
+      .markdown-body p { text-align: left; }
+      .checkpoint-meta { display: block; text-align: center; }
+      .checkpoint-meta span { display: block; }
+      .checkpoint-meta span + span::before { content: none; }
+      .history-item { grid-template-columns: 1fr; gap: 4px; }
+      .preview-search { order: 10; width: 100%; }
+    }
+    @media print {
+      @page { size: A4; margin: 21mm; }
+      html, body { background: #fff; }
+      .checkpoint-viewer { display: block; width: auto; margin: 0; }
+      .sidebar, .viewer-toolbar, .artifact-inspector { display: none !important; }
+      .paper { padding: 0; box-shadow: none; }
+      body { font-size: 10.5pt; line-height: 1.48; }
+      .markdown-body > h1 { font-size: 22pt; }
+      .markdown-body h2 { margin-top: 22pt; font-size: 15pt; }
+      .markdown-body h3 { font-size: 12pt; }
+      .checkpoint-figure img { max-height: 180mm; }
+    }
+  </style>
+</head>
+<body>
+  <div class="checkpoint-viewer">
+    <main class="paper">
+      <div class="viewer-toolbar">
+        <button class="quiet-button" id="refresh-button" type="button">刷新</button>
+        <button class="quiet-button" id="print-button" type="button">Print / PDF</button>
+      </div>
+      <article id="viewer-content"><div class="loading">正在读取 checkpoint…</div></article>
+    </main>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-title">Checkpoint Viewer</div>
+        <div class="brand-subtitle">Research notes in this project</div>
+      </div>
+      <nav class="viewer-links"><a href="/latest">最新</a><a href="/">历史</a></nav>
+      <div class="side-heading" id="toc-heading">Contents</div>
+      <nav class="side-nav" id="toc-nav"></nav>
+      <div class="side-heading">Recent checkpoints</div>
+      <nav class="side-nav" id="history-nav"></nav>
+      <div class="session-note">项目 Markdown · 原始 artifacts · localhost Viewer</div>
+    </aside>
+  </div>
+
+  <dialog id="image-dialog">
+    <div class="dialog-head"><strong id="dialog-title">Figure</strong><button class="quiet-button" id="dialog-close" type="button">关闭</button></div>
+    <img class="dialog-image" id="dialog-image" alt="Expanded figure">
+  </dialog>
+
+  <script>
+    "use strict";
+
+    const content = document.getElementById("viewer-content");
+    const tocNav = document.getElementById("toc-nav");
+    const historyNav = document.getElementById("history-nav");
+    const tocHeading = document.getElementById("toc-heading");
+    const imageDialog = document.getElementById("image-dialog");
+    const escapeHtml = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+
+    async function requestJson(url) {
+      const response = await fetch(url, { cache: "no-store" });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || `Request failed: ${response.status}`);
+      return value;
+    }
+
+    async function loadViewer() {
+      content.innerHTML = '<div class="loading">正在读取 checkpoint…</div>';
+      try {
+        const history = await requestJson("/api/checkpoints");
+        renderRecent(history);
+        const path = location.pathname;
+        if (path === "/" || path === "") renderHistory(history);
+        else {
+          const endpoint = path === "/latest"
+            ? "/api/latest"
+            : `/api/checkpoints/${encodeURIComponent(decodeURIComponent(path.slice("/checkpoints/".length)))}`;
+          renderCheckpoint(await requestJson(endpoint));
+        }
+      } catch (error) {
+        content.innerHTML = `<div class="error-state">${escapeHtml(error.message || error)}</div>`;
+      }
+    }
+
+    function renderCheckpoint(payload) {
+      document.title = `${payload.metadata.title} — Checkpoint Viewer`;
+      content.innerHTML = `<div class="markdown-body">${payload.html}</div>`;
+      const body = content.querySelector(".markdown-body");
+      const title = body.querySelector("h1");
+      const meta = document.createElement("div");
+      meta.className = "checkpoint-meta";
+      const created = new Date(payload.metadata.created_at);
+      meta.innerHTML = `<span>${escapeHtml(created.toLocaleString("zh-CN"))}</span><span>${escapeHtml(payload.metadata.experiment_id || payload.metadata.id)}</span><span>${escapeHtml(payload.markdown_path)}</span>`;
+      const lead = document.createElement("div");
+      lead.className = "checkpoint-lead";
+      lead.innerHTML = `<strong>最重要结论</strong>${escapeHtml(payload.metadata.short_conclusion)}`;
+      if (title) title.after(meta, lead);
+      else body.prepend(meta, lead);
+      renderToc(payload.toc);
+      renderCharts(body);
+      enhanceArtifactPreviews(body);
+      body.querySelectorAll(".checkpoint-figure img").forEach(image => image.addEventListener("click", () => openImage(image)));
+      if (window.MathJax?.typesetPromise) window.MathJax.typesetPromise([body]).catch(() => {});
+    }
+
+    function renderToc(entries) {
+      tocHeading.textContent = "Contents";
+      tocNav.replaceChildren();
+      entries.forEach(entry => {
+        const link = document.createElement("a");
+        link.href = `#${entry.id}`;
+        link.textContent = entry.text;
+        if (entry.depth === 3) link.className = "subsection";
+        tocNav.append(link);
+      });
+    }
+
+    function renderRecent(history) {
+      historyNav.replaceChildren();
+      history.slice(0, 8).forEach(item => {
+        const link = document.createElement("a");
+        link.href = item.url;
+        const label = document.createElement("span");
+        label.textContent = item.title;
+        const time = document.createElement("time");
+        time.textContent = new Date(item.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+        link.append(label, time);
+        historyNav.append(link);
+      });
+    }
+
+    function renderHistory(history) {
+      document.title = "Checkpoint History — Checkpoint Viewer";
+      tocHeading.textContent = "History";
+      tocNav.replaceChildren();
+      if (!history.length) {
+        content.innerHTML = '<div class="empty-state">当前项目还没有 checkpoint。</div>';
+        return;
+      }
+      const groups = new Map();
+      history.forEach(item => {
+        const date = new Date(item.created_at).toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+        if (!groups.has(date)) groups.set(date, []);
+        groups.get(date).push(item);
+      });
+      content.replaceChildren();
+      const header = document.createElement("header");
+      header.className = "history-header";
+      header.innerHTML = `<h1>Checkpoint History</h1><p>${history.length} 篇项目研究记录；最新内容始终位于 <a href="/latest">/latest</a>。</p>`;
+      content.append(header);
+      groups.forEach((items, date) => {
+        const section = document.createElement("section");
+        section.className = "history-group";
+        section.append(Object.assign(document.createElement("h2"), { textContent: date }));
+        const list = document.createElement("ol");
+        list.className = "history-list";
+        items.forEach(item => {
+          const row = document.createElement("li");
+          row.className = "history-item";
+          const time = document.createElement("time");
+          time.className = "history-time";
+          time.textContent = new Date(item.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+          const text = document.createElement("div");
+          const link = document.createElement("a");
+          link.className = "history-title";
+          link.href = item.url;
+          link.textContent = item.title;
+          const conclusion = document.createElement("div");
+          conclusion.className = "history-conclusion";
+          conclusion.textContent = item.short_conclusion;
+          text.append(link, conclusion);
+          row.append(time, text);
+          list.append(row);
+        });
+        section.append(list);
+        content.append(section);
+      });
+    }
+
+    function renderCharts(root) {
+      root.querySelectorAll(".checkpoint-chart[data-chart]").forEach(container => {
+        try {
+          const encoded = container.dataset.chart.replaceAll("-", "+").replaceAll("_", "/");
+          const padded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+          const binary = atob(padded);
+          const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+          const config = JSON.parse(new TextDecoder().decode(bytes));
+          drawChart(container, config);
+        } catch (error) {
+          container.textContent = `图表配置无效：${String(error)}`;
+          container.classList.add("chart-error");
+        }
+      });
+    }
+
+    function drawChart(container, config) {
+      if (config.type === "line") drawLineChart(container, config);
+      else drawBarChart(container, config);
+      const caption = document.createElement("figcaption");
+      caption.className = "chart-caption";
+      caption.textContent = config.title || "图　Checkpoint chart";
+      container.append(caption);
+    }
+
+    function svgElement(name, attributes = {}) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+      Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+      return node;
+    }
+
+    function drawBarChart(container, config) {
+      const items = Array.isArray(config.items) ? config.items.filter(item => Number.isFinite(Number(item.value))).slice(0, 24) : [];
+      if (!items.length) throw new Error("bar chart requires items");
+      const width = 900, height = 420, left = 76, right = 24, top = 25, bottom = 86;
+      const plotWidth = width - left - right, plotHeight = height - top - bottom;
+      const values = items.map(item => Number(item.value));
+      const min = Math.min(0, ...values), rawMax = Math.max(0, ...values), max = rawMax === min ? min + 1 : rawMax;
+      const span = max - min;
+      const y = value => top + (max - value) / span * plotHeight;
+      const zero = y(0), slot = plotWidth / items.length, barWidth = Math.min(90, slot * .62);
+      const svg = svgElement("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": config.title || "bar chart" });
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const value = min + span * tick / 4;
+        const yy = y(value);
+        svg.append(svgElement("line", { x1: left, x2: width - right, y1: yy, y2: yy, class: "chart-grid" }));
+        const label = svgElement("text", { x: left - 10, y: yy + 4, "text-anchor": "end", class: "chart-value" });
+        label.textContent = formatNumber(value);
+        svg.append(label);
+      }
+      svg.append(svgElement("line", { x1: left, x2: width - right, y1: zero, y2: zero, class: "chart-axis" }));
+      items.forEach((item, index) => {
+        const value = Number(item.value), x = left + slot * index + (slot - barWidth) / 2;
+        const yy = y(value), barY = Math.min(yy, zero), barHeight = Math.max(1, Math.abs(zero - yy));
+        svg.append(svgElement("rect", { x, y: barY, width: barWidth, height: barHeight, fill: chartColor(item.color, "#1d4d7a") }));
+        const valueText = svgElement("text", { x: x + barWidth / 2, y: value >= 0 ? barY - 7 : barY + barHeight + 16, "text-anchor": "middle", class: "chart-value" });
+        valueText.textContent = formatNumber(value);
+        const label = svgElement("text", { x: x + barWidth / 2, y: height - bottom + 24, "text-anchor": "middle", class: "chart-label" });
+        label.textContent = String(item.label ?? index + 1);
+        svg.append(valueText, label);
+      });
+      container.append(svg);
+    }
+
+    function drawLineChart(container, config) {
+      const series = (Array.isArray(config.series) ? config.series : []).slice(0, 12).map(item => ({
+        ...item,
+        points: (Array.isArray(item.points) ? item.points : [])
+          .filter(point => Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)))
+          .slice(0, 500)
+          .sort((left, right) => Number(left.x) - Number(right.x)),
+      })).filter(item => item.points.length);
+      const points = series.flatMap(item => item.points);
+      if (!points.length) throw new Error("line chart requires series points");
+      const width = 900, height = 420, left = 76, right = 28, top = 58, bottom = 68;
+      const xs = points.map(point => Number(point.x)), ys = points.map(point => Number(point.y));
+      const rawMinX = Math.min(...xs), rawMaxX = Math.max(...xs), rawMinY = Math.min(...ys), rawMaxY = Math.max(...ys);
+      const xPadding = rawMinX === rawMaxX ? Math.abs(rawMinX) * .05 || .5 : 0;
+      const yPadding = rawMinY === rawMaxY ? Math.abs(rawMinY) * .05 || .5 : 0;
+      const minX = rawMinX - xPadding, maxX = rawMaxX + xPadding, minY = rawMinY - yPadding, maxY = rawMaxY + yPadding;
+      const xSpan = maxX - minX, ySpan = maxY - minY;
+      const x = value => left + (Number(value) - minX) / xSpan * (width - left - right);
+      const y = value => top + (maxY - Number(value)) / ySpan * (height - top - bottom);
+      const svg = svgElement("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": config.title || "line chart" });
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const xValue = minX + xSpan * tick / 4, yValue = minY + ySpan * tick / 4;
+        const xx = x(xValue), yy = y(yValue);
+        svg.append(svgElement("line", { x1: left, x2: width - right, y1: yy, y2: yy, class: "chart-grid" }));
+        const xLabel = svgElement("text", { x: xx, y: height - bottom + 23, "text-anchor": "middle", class: "chart-value" });
+        const yLabel = svgElement("text", { x: left - 10, y: yy + 4, "text-anchor": "end", class: "chart-value" });
+        xLabel.textContent = formatNumber(xValue); yLabel.textContent = formatNumber(yValue);
+        svg.append(xLabel, yLabel);
+      }
+      svg.append(svgElement("line", { x1: left, x2: left, y1: top, y2: height - bottom, class: "chart-axis" }));
+      svg.append(svgElement("line", { x1: left, x2: width - right, y1: height - bottom, y2: height - bottom, class: "chart-axis" }));
+      const colors = ["#1d4d7a", "#963737", "#2f6546", "#79571c", "#695184"];
+      series.forEach((item, index) => {
+        const color = chartColor(item.color, colors[index % colors.length]);
+        const path = item.points.map((point, pointIndex) => `${pointIndex ? "L" : "M"}${x(point.x)} ${y(point.y)}`).join(" ");
+        svg.append(svgElement("path", { d: path, fill: "none", stroke: color, "stroke-width": 3 }));
+        item.points.forEach(point => svg.append(svgElement("circle", { cx: x(point.x), cy: y(point.y), r: 4, fill: color })));
+        const legendX = left + (index % 4) * 195, legendY = 18 + Math.floor(index / 4) * 17;
+        svg.append(svgElement("line", { x1: legendX, x2: legendX + 24, y1: legendY, y2: legendY, stroke: color, "stroke-width": 3 }));
+        const legend = svgElement("text", { x: legendX + 31, y: legendY + 4, class: "chart-label" });
+        legend.textContent = String(item.name ?? `series ${index + 1}`).slice(0, 24);
+        svg.append(legend);
+      });
+      container.append(svg);
+    }
+
+    function chartColor(value, fallback) {
+      return typeof value === "string" && /^(?:#[0-9a-f]{3,8}|[a-z]{3,20})$/i.test(value) ? value : fallback;
+    }
+
+    function formatNumber(value) {
+      return Number(value).toLocaleString(undefined, { maximumSignificantDigits: 4 });
+    }
+
+    function enhanceArtifactPreviews(root) {
+      root.querySelectorAll("a[data-preview-url]").forEach(anchor => {
+        const details = document.createElement("details");
+        details.className = "artifact-inspector";
+        const summary = document.createElement("summary");
+        summary.textContent = `预览 ${anchor.dataset.previewKind.toUpperCase()} · ${anchor.textContent}`;
+        const target = document.createElement("div");
+        target.className = "artifact-preview";
+        details.append(summary, target);
+        anchor.parentElement.insertBefore(details, anchor.nextSibling);
+        let loaded = false;
+        details.addEventListener("toggle", async () => {
+          if (!details.open || loaded) return;
+          loaded = true;
+          target.innerHTML = '<div class="loading">正在读取 artifact…</div>';
+          try {
+            const payload = await requestJson(anchor.dataset.previewUrl);
+            if (payload.kind === "json") renderJsonPreview(target, payload, anchor.textContent);
+            else renderCsvPreview(target, payload, anchor.textContent);
+          } catch (error) {
+            target.innerHTML = `<div class="error-state">${escapeHtml(error.message || error)}</div>`;
+          }
+        });
+      });
+    }
+
+    function renderJsonPreview(root, payload, title) {
+      let parsed;
+      try { parsed = JSON.parse(payload.text); } catch { parsed = undefined; }
+      const toolbar = document.createElement("div");
+      toolbar.className = "preview-toolbar";
+      toolbar.innerHTML = `<span class="preview-title">${escapeHtml(title)}</span><span class="preview-stat">${(payload.size / 1024).toFixed(1)} KB${payload.truncated ? " · truncated" : ""}</span>`;
+      const treeButton = button("Tree", "preview-action active");
+      const rawButton = button("Raw", "preview-action");
+      const search = document.createElement("input");
+      search.className = "preview-search";
+      search.type = "search";
+      search.placeholder = "按键名搜索…";
+      if (!parsed) treeButton.disabled = true;
+      toolbar.append(treeButton, rawButton, search);
+      const body = document.createElement("div");
+      body.className = "preview-content";
+      root.replaceChildren(toolbar, body);
+      let mode = parsed ? "tree" : "raw";
+      let timer;
+      const draw = () => {
+        const query = search.value.trim();
+        body.replaceChildren();
+        if (mode === "tree" && parsed) body.append(query ? renderKeyMatches(parsed, query) : renderTreeNode(null, parsed, 0));
+        else body.append(renderRaw(payload.text, query));
+        body.classList.toggle("json-tree", mode === "tree");
+        treeButton.classList.toggle("active", mode === "tree");
+        rawButton.classList.toggle("active", mode === "raw");
+        search.placeholder = mode === "tree" ? "按键名搜索…" : "搜索 raw key / value…";
+      };
+      treeButton.addEventListener("click", () => { mode = "tree"; draw(); search.focus(); });
+      rawButton.addEventListener("click", () => { mode = "raw"; draw(); search.focus(); });
+      search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(draw, 120); });
+      draw();
+    }
+
+    function renderCsvPreview(root, payload, title) {
+      const rows = parseCsv(payload.text).slice(0, 101);
+      const toolbar = document.createElement("div");
+      toolbar.className = "preview-toolbar";
+      toolbar.innerHTML = `<span class="preview-title">${escapeHtml(title)}</span><span class="preview-stat">${(payload.size / 1024).toFixed(1)} KB · first ${Math.max(0, rows.length - 1)} rows${payload.truncated ? " · truncated" : ""}</span>`;
+      const body = document.createElement("div");
+      body.className = "preview-content";
+      const table = document.createElement("table");
+      table.className = "csv-preview";
+      if (rows.length) {
+        const head = document.createElement("thead"), header = document.createElement("tr");
+        rows[0].forEach(value => header.append(Object.assign(document.createElement("th"), { textContent: value })));
+        head.append(header); table.append(head);
+        const tbody = document.createElement("tbody");
+        rows.slice(1).forEach(row => {
+          const tr = document.createElement("tr");
+          rows[0].forEach((_, index) => tr.append(Object.assign(document.createElement("td"), { textContent: row[index] || "" })));
+          tbody.append(tr);
+        });
+        table.append(tbody);
+      }
+      body.append(table); root.replaceChildren(toolbar, body);
+    }
+
+    function renderTreeNode(key, value, depth) {
+      if (value === null || typeof value !== "object") {
+        const row = document.createElement("div"); row.className = "json-row";
+        if (key !== null) row.append(span("json-key", `${JSON.stringify(String(key))}: `));
+        row.append(primitive(value)); return row;
+      }
+      const details = document.createElement("details"); details.open = depth < 2;
+      const count = Array.isArray(value) ? value.length : Object.keys(value).length;
+      const summary = document.createElement("summary");
+      if (key !== null) summary.append(span("json-key", `${JSON.stringify(String(key))}: `));
+      summary.append(span("json-shape", Array.isArray(value) ? `[${count}]` : `{${count}}`)); details.append(summary);
+      let built = false;
+      const build = () => {
+        if (built) return; built = true;
+        const entries = Object.entries(value);
+        if (Array.isArray(value) && entries.length > 50) {
+          for (let start = 0; start < entries.length; start += 50) {
+            const chunk = document.createElement("details");
+            chunk.append(Object.assign(document.createElement("summary"), { textContent: `items ${start}–${Math.min(entries.length, start + 50) - 1}` }));
+            let chunkBuilt = false;
+            chunk.addEventListener("toggle", () => {
+              if (!chunk.open || chunkBuilt) return; chunkBuilt = true;
+              entries.slice(start, start + 50).forEach(([childKey, child]) => chunk.append(renderTreeNode(childKey, child, depth + 1)));
+            });
+            details.append(chunk);
+          }
+        } else entries.forEach(([childKey, child]) => details.append(renderTreeNode(childKey, child, depth + 1)));
+      };
+      details.addEventListener("toggle", () => { if (details.open) build(); }); if (details.open) build(); return details;
+    }
+
+    function renderKeyMatches(value, query) {
+      const root = document.createElement("div"), normalized = query.toLowerCase(), stack = [{ value, path: "$" }], matches = [];
+      while (stack.length && matches.length < 500) {
+        const current = stack.pop(); if (!current.value || typeof current.value !== "object") continue;
+        const array = Array.isArray(current.value);
+        Object.entries(current.value).forEach(([key, child]) => {
+          const path = array ? `${current.path}[${key}]` : /^[A-Za-z_$][\w$]*$/.test(key) ? `${current.path}.${key}` : `${current.path}[${JSON.stringify(key)}]`;
+          if (!array && key.toLowerCase().includes(normalized)) matches.push({ path, value: child });
+          if (child && typeof child === "object") stack.push({ value: child, path });
+        });
+      }
+      if (!matches.length) return Object.assign(root, { className: "preview-empty", textContent: "没有匹配的键名" });
+      matches.forEach(match => { const row = document.createElement("div"); row.className = "json-row"; row.append(span("json-key", `${match.path}: `)); row.append(match.value && typeof match.value === "object" ? span("json-shape", Array.isArray(match.value) ? `[${match.value.length}]` : `{${Object.keys(match.value).length}}`) : primitive(match.value)); root.append(row); });
+      return root;
+    }
+
+    function renderRaw(raw, query) {
+      const root = document.createElement("div"), normalized = query.toLowerCase();
+      raw.split("\n").forEach((line, index) => {
+        if (normalized && !line.toLowerCase().includes(normalized)) return;
+        const row = document.createElement("div"); row.className = "json-line";
+        row.append(span("json-line-number", String(index + 1)));
+        const code = document.createElement("code"); code.textContent = line; row.append(code); root.append(row);
+      });
+      if (!root.children.length) root.append(Object.assign(document.createElement("div"), { className: "preview-empty", textContent: "没有匹配项" }));
+      return root;
+    }
+
+    function primitive(value) {
+      if (value === null) return span("json-null", "null");
+      if (typeof value === "string") return span("json-string", JSON.stringify(value));
+      if (typeof value === "number") return span("json-number", String(value));
+      if (typeof value === "boolean") return span("json-boolean", String(value));
+      return span("json-null", String(value));
+    }
+    function span(className, text) { const node = document.createElement("span"); node.className = className; node.textContent = text; return node; }
+    function button(text, className) { const node = document.createElement("button"); node.type = "button"; node.className = className; node.textContent = text; return node; }
+
+    function parseCsv(text) {
+      const rows = []; let row = [], field = "", quoted = false;
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === '"') {
+          if (quoted && text[index + 1] === '"') { field += '"'; index += 1; }
+          else quoted = !quoted;
+        } else if (char === "," && !quoted) { row.push(field); field = ""; }
+        else if ((char === "\n" || char === "\r") && !quoted) {
+          if (char === "\r" && text[index + 1] === "\n") index += 1;
+          row.push(field); rows.push(row); row = []; field = "";
+        } else field += char;
+      }
+      if (field || row.length) { row.push(field); rows.push(row); }
+      return rows;
+    }
+
+    function openImage(image) {
+      document.getElementById("dialog-title").textContent = image.closest("figure")?.querySelector("figcaption")?.textContent || image.alt || "Figure";
+      document.getElementById("dialog-image").src = image.src;
+      imageDialog.showModal();
+    }
+
+    document.getElementById("refresh-button").addEventListener("click", loadViewer);
+    document.getElementById("print-button").addEventListener("click", () => window.print());
+    document.getElementById("dialog-close").addEventListener("click", () => imageDialog.close());
+    imageDialog.addEventListener("click", event => { if (event.target === imageDialog) imageDialog.close(); });
+    loadViewer();
+  </script>
+</body>
+</html>

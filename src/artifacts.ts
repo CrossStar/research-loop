@@ -1,26 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveArtifactMetadata } from "./core/artifacts.js";
+import { resolveArtifactMetadata, SUPPORTED_ARTIFACT_EXTENSIONS } from "./core/artifacts.js";
 import type { ArtifactMetadata } from "./core/types.js";
-import { createReadStream, type FSWatcher, watch } from "node:fs";
-import { open, readFile, stat } from "node:fs/promises";
-import { basename, dirname, extname, relative, resolve, sep } from "node:path";
+import { createReadStream, existsSync, realpathSync, statSync, type FSWatcher, watch } from "node:fs";
+import { open, opendir, readFile, realpath, stat } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { formatTable } from "./table.js";
 
 export type { ArtifactKind } from "./core/types.js";
 export type ArtifactRecord = ArtifactMetadata;
 
-const SUPPORTED_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".svg",
-  ".csv",
-  ".json",
-  ".html",
-  ".pdf",
-  ".parquet",
-]);
+const SUPPORTED_EXTENSIONS = SUPPORTED_ARTIFACT_EXTENSIONS;
 const TABLE_EXTENSIONS = new Set([".csv", ".parquet"]);
 const MAX_REPORT_JSON_BYTES = 32 * 1024 * 1024;
 
@@ -30,7 +20,17 @@ const IMAGE_MIME: Record<string, string> = {
   ".jpeg": "image/jpeg",
 };
 
-const IGNORED_DIRECTORIES = new Set([".git", ".pi", "node_modules", ".venv", "venv", "__pycache__"]);
+const IGNORED_DIRECTORIES = new Set([".git", ".pi", ".claude", "node_modules", ".venv", "venv", "__pycache__"]);
+const CONVENTIONAL_ARTIFACT_SUBDIRECTORIES = new Set([
+  "figures",
+  "plots",
+  "predictions",
+  "activations",
+  "checkpoints",
+  "logs",
+  "tables",
+  "shards",
+]);
 const IGNORED_FILES = new Set([
   "package.json",
   "package-lock.json",
@@ -46,7 +46,7 @@ export interface ArtifactPreview {
 }
 
 export class ArtifactRadar {
-  private watcher: FSWatcher | undefined;
+  private watchers: FSWatcher[] = [];
   private stopped = true;
   private captureDepth = 0;
   private records: ArtifactRecord[];
@@ -59,25 +59,35 @@ export class ArtifactRadar {
     private readonly cwd: string,
     initialRecords: ArtifactRecord[],
     private readonly onArtifact: (record: ArtifactRecord, isNew: boolean) => void,
+    private readonly artifactRoots: string[] = [],
   ) {
     this.records = [...initialRecords];
   }
 
   start(): void {
+    if (this.watchers.length > 0) return;
     this.stopped = false;
-    this.watcher = watch(this.cwd, { recursive: true }, (_event, filename) => {
-      if (this.captureDepth === 0 || !filename) return;
-      const relativePath = filename.toString();
-      if (!isCandidate(relativePath)) return;
-      this.queue(relativePath);
-    });
-    this.watcher.on("error", () => this.stop());
+    try {
+      for (const target of resolveWatchTargets(this.cwd, this.artifactRoots)) {
+        const watcher = watch(target, { recursive: true }, (_event, filename) => {
+          if (this.captureDepth === 0 || !filename) return;
+          const relativePath = relative(this.cwd, resolve(target, filename.toString())).split(sep).join("/");
+          if (!isWithinRoots(relativePath, this.artifactRoots) || !isCandidate(relativePath)) return;
+          this.queue(relativePath);
+        });
+        watcher.on("error", () => this.stop());
+        this.watchers.push(watcher);
+      }
+    } catch (error) {
+      this.stop();
+      throw error;
+    }
   }
 
   stop(): void {
     this.stopped = true;
-    this.watcher?.close();
-    this.watcher = undefined;
+    for (const watcher of this.watchers) watcher.close();
+    this.watchers = [];
     for (const timer of [...this.pending.values(), ...this.pendingDatasetEmits.values()]) clearTimeout(timer);
     this.pending.clear();
     this.pendingDatasetEmits.clear();
@@ -195,6 +205,120 @@ export async function resolveArtifactRecord(cwd: string, inputPath: string): Pro
   return resolveArtifactMetadata(cwd, inputPath);
 }
 
+export function normalizeArtifactRoots(cwd: string, inputs: string[]): string[] {
+  const project = resolve(cwd);
+  const projectReal = realpathSync(project);
+  const normalized: string[] = [];
+  for (const input of inputs) {
+    if (typeof input !== "string" || !input.trim()) continue;
+    const absolute = resolve(project, input.trim());
+    const projectRelative = relative(project, absolute);
+    if (projectRelative === ".." || projectRelative.startsWith(`..${sep}`) || isAbsolute(projectRelative)) continue;
+    if (existsSync(absolute)) {
+      const resolvedTarget = realpathSync(absolute);
+      const realRelative = relative(projectReal, resolvedTarget);
+      if (realRelative === ".." || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative)) continue;
+    }
+    normalized.push((projectRelative || ".").split(sep).join("/"));
+  }
+  return compactRoots(normalized);
+}
+
+export function inferArtifactRoot(record: ArtifactRecord): string {
+  if (record.kind === "dataset") return stripConventionalLeaf(record.path);
+  const directory = dirname(record.path).split(sep).join("/");
+  return directory === "." ? "." : stripConventionalLeaf(directory);
+}
+
+/** Rebuild the ephemeral inventory by scanning only explicit, project-local artifact roots. */
+export async function discoverArtifactsFromRoots(cwd: string, inputs: string[]): Promise<ArtifactRecord[]> {
+  const roots = normalizeArtifactRoots(cwd, inputs);
+  const projectReal = await realpath(cwd);
+  const files = new Map<string, ArtifactRecord>();
+  const datasets = new Map<string, {
+    extension: string;
+    size: number;
+    mtimeMs: number;
+    fileCount: number;
+    samplePath: string;
+  }>();
+
+  const inspectFile = async (absolutePath: string) => {
+    const normalizedPath = relative(projectReal, absolutePath).split(sep).join("/");
+    if (!isCandidate(normalizedPath)) return;
+    const fileStat = await stat(absolutePath);
+    if (!fileStat.isFile()) return;
+    const extension = extname(normalizedPath).toLowerCase();
+    if (isDatasetShard(normalizedPath, extension)) {
+      const datasetPath = dirname(normalizedPath).split(sep).join("/");
+      const previous = datasets.get(datasetPath);
+      datasets.set(datasetPath, {
+        extension,
+        size: (previous?.size ?? 0) + fileStat.size,
+        mtimeMs: Math.max(previous?.mtimeMs ?? 0, fileStat.mtimeMs),
+        fileCount: (previous?.fileCount ?? 0) + 1,
+        samplePath: previous?.samplePath ?? normalizedPath,
+      });
+      return;
+    }
+    files.set(`file:${normalizedPath}`, {
+      kind: "file",
+      path: normalizedPath,
+      name: basename(normalizedPath),
+      extension,
+      size: fileStat.size,
+      mtimeMs: fileStat.mtimeMs,
+      discoveredAt: Date.now(),
+    });
+  };
+
+  for (const root of roots) {
+    const absoluteRoot = resolve(cwd, root);
+    let rootStat;
+    try {
+      const resolvedRoot = await realpath(absoluteRoot);
+      const realRelative = relative(projectReal, resolvedRoot);
+      if (realRelative === ".." || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative)) continue;
+      rootStat = await stat(resolvedRoot);
+      if (rootStat.isFile()) {
+        await inspectFile(resolvedRoot);
+        continue;
+      }
+      if (!rootStat.isDirectory()) continue;
+
+      const queue = [resolvedRoot];
+      while (queue.length > 0) {
+        const directory = queue.shift();
+        if (!directory) break;
+        const handle = await opendir(directory);
+        for await (const entry of handle) {
+          const absoluteEntry = resolve(directory, entry.name);
+          if (entry.isDirectory()) {
+            if (!IGNORED_DIRECTORIES.has(entry.name)) queue.push(absoluteEntry);
+          } else if (entry.isFile()) await inspectFile(absoluteEntry);
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  for (const [path, dataset] of datasets) {
+    files.set(`dataset:${path}`, {
+      kind: "dataset",
+      path,
+      name: basename(path),
+      extension: dataset.extension,
+      size: dataset.size,
+      mtimeMs: dataset.mtimeMs,
+      discoveredAt: Date.now(),
+      fileCount: dataset.fileCount,
+      samplePath: dataset.samplePath,
+    });
+  }
+  return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
 export async function loadArtifactPreview(
   pi: ExtensionAPI,
   cwd: string,
@@ -264,6 +388,53 @@ export function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function compactRoots(roots: string[]): string[] {
+  const ordered = [...new Set(roots)].sort((a, b) => a.length - b.length || a.localeCompare(b));
+  const compacted: string[] = [];
+  for (const root of ordered) {
+    if (compacted.some((parent) => parent === "." || root === parent || root.startsWith(`${parent}/`))) continue;
+    compacted.push(root);
+  }
+  return compacted;
+}
+
+function stripConventionalLeaf(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
+  const parts = normalized.split("/");
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    if (/^(?:run|experiment|exp)[-_.].+/i.test(parts[index]!)) {
+      return parts.slice(0, index + 1).join("/");
+    }
+  }
+  if (parts.length > 1 && CONVENTIONAL_ARTIFACT_SUBDIRECTORIES.has(parts.at(-1)!.toLowerCase())) {
+    return parts.slice(0, -1).join("/");
+  }
+  return normalized;
+}
+
+function isWithinRoots(path: string, roots: string[]): boolean {
+  if (roots.length === 0) return true;
+  return roots.some((root) => root === "." || path === root || path.startsWith(`${root}/`));
+}
+
+function resolveWatchTargets(cwd: string, roots: string[]): string[] {
+  const normalizedRoots = normalizeArtifactRoots(cwd, roots);
+  if (normalizedRoots.length === 0) return [resolve(cwd)];
+  const projectReal = realpathSync(cwd);
+  const targets = normalizedRoots.map((root) => {
+    let candidate = resolve(cwd, root);
+    if (existsSync(candidate) && statSync(candidate).isFile()) candidate = dirname(candidate);
+    while (!existsSync(candidate) && candidate !== resolve(cwd)) candidate = dirname(candidate);
+    const resolvedTarget = realpathSync(candidate);
+    const projectRelative = relative(projectReal, resolvedTarget);
+    return projectRelative === ".." || projectRelative.startsWith(`..${sep}`) || isAbsolute(projectRelative)
+      ? projectReal
+      : resolvedTarget;
+  });
+  return compactRoots(targets.map((target) => relative(projectReal, target).split(sep).join("/") || "."))
+    .map((target) => resolve(projectReal, target));
 }
 
 function isCandidate(relativePath: string): boolean {

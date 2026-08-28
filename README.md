@@ -16,7 +16,7 @@ Research Loop 是一个面向 **Pi** 的 evidence-first 科研工作流插件。
 - **研究者友好的实验代码**：清晰 `main()`、Rich phase 展示、tqdm 进度、集中参数和可预测输出。
 - **持久化 Checkpoint**：在项目的 `checkpoints/` 中写入中文 Markdown 研究记录。
 - **统一 Checkpoint Viewer**：一个插件内 Viewer 展示全部历史记录、公式、表格、图片和 JSON/CSV。
-- **Artifact Radar**：发现实验产生的 PNG、SVG、CSV、JSON、Parquet、PDF 等结果文件。
+- **Artifact Radar**：只在 Experiment Mode 运行，优先监听明确的输出范围，并发现 PNG、SVG、CSV、JSON、Parquet、PDF 等结果文件。
 - **终端图片预览**：Checkpoint 图片优先使用 Chafa Sixel，`/artifacts` 使用 Chafa symbols。
 - **可见状态**：Pi footer 持续显示当前 mode、实验 intent、actions、outputs 和 review 状态。
 
@@ -37,7 +37,7 @@ pi install -l git:github.com/CrossStar/research-loop
 固定到某个 release：
 
 ```bash
-pi install git:github.com/CrossStar/research-loop@research-loop--v0.5.1
+pi install git:github.com/CrossStar/research-loop@research-loop--v0.5.2
 ```
 
 > Pi package 会以当前用户权限运行。安装第三方扩展前应检查源码。
@@ -99,7 +99,8 @@ Research Loop 默认关闭。在 Pi 中输入：
 - experiment title；
 - intent；
 - planned data scope；
-- reference protocol（如适用）。
+- reference protocol（如适用）；
+- project-relative artifact roots（已知输出目录时）。
 
 实验产生可解释结果后，Agent 调用 `research_checkpoint`。插件会：
 
@@ -114,10 +115,11 @@ Research Loop 默认关闭。在 Pi 中输入：
 /research off
 ```
 
-查看本 session 发现的 artifacts：
+查看本 session 发现的 artifacts，或按需启动历史 Checkpoint Viewer：
 
 ```text
 /artifacts
+/checkpoint-viewer
 ```
 
 ## Work Modes
@@ -241,7 +243,8 @@ Writer 使用混合接口：四段主要正文使用自然 Markdown，protocol�
 ## Checkpoint Viewer
 
 插件只维护一个 HTML/CSS/JS Viewer。历史 Checkpoint 保持 Markdown 格式，Viewer 样式更新后，所有
-历史记录立即使用新样式，无需重新生成 HTML。
+历史记录立即使用新样式，无需重新生成 HTML。Viewer 不再占用 `session_start` 路径；首次生成
+Checkpoint 或调用 `/checkpoint-viewer` 时才会启动。
 
 主要路由：
 
@@ -315,7 +318,32 @@ activations
 ```
 
 Checkpoint Writer 只记录引用。图片、表格和模型输出不会复制到 `checkpoints/`，也不会以 base64
-写入 Markdown。
+写入 Markdown 或 session tool details。展开 TUI Checkpoint 结果时，图片预览才从原文件按需读取。
+
+Pi session 的 `research-loop-state` 只保存体积很小的控制状态和 `artifactRoots`，不会保存完整
+artifact inventory。恢复 session 后，插件仅在需要 `/artifacts`、恢复中的 Experiment 或进入新
+Experiment 时扫描这些明确目录。Artifact Radar 也只在 Experiment Mode 存活；关闭 Research Loop、
+进入只读模式或完成 Checkpoint 后会立即停止递归 watcher。
+
+持久化状态保持为类似以下的小对象：
+
+```json
+{
+  "enabled": true,
+  "workMode": "experiment",
+  "artifactRoots": ["results/seed_bimodality/run-20260828-2314"]
+}
+```
+
+进入 Experiment Mode 时应尽量声明稳定的项目相对输出目录，例如：
+
+```text
+artifactRoots: ["results/seed_bimodality/run-20260828-2314"]
+```
+
+没有显式目录时，Radar 会从实际产物路径推断 run directory，并把少量 root paths 写入控制状态。
+旧 session 中已经嵌入的 artifact 快照会在首次加载后迁移成 roots-only 新状态；旧 JSONL 的历史行
+仍保留在原文件中，新写入的状态不会继续放大它。
 
 如果 `chafa` 在 `PATH` 中：
 
@@ -415,7 +443,7 @@ pi -e .
 
 ```text
 research-loop/
-├── src/index.ts                         # Pi extension entry
+├── src/index.ts                         # Pi extension source entry
 ├── src/runtime.ts                       # Pi Research State、policy 和 tool gate
 ├── src/checkpoint.ts                    # Checkpoint tool 与 TUI result
 ├── src/checkpoint-store.ts              # Markdown writer、discovery 和 validation
@@ -423,7 +451,9 @@ research-loop/
 ├── src/checkpoint-report-template.html  # 唯一 Viewer HTML/CSS/JS
 ├── src/artifacts.ts                     # Artifact Radar 与 preview
 ├── src/terminal-image.ts                # Chafa 和 native image fallback
-└── src/core/                            # State machine、Governor 和共享类型
+├── src/core/                            # State machine、Governor 和共享类型
+├── scripts/build-pi.mjs                 # Pi ESM bundle build
+└── dist/pi/                             # Pi 实际加载的预编译 extension 与 Viewer template
 ```
 
 详细文档：
@@ -441,9 +471,10 @@ npm run check
 npm run test:pi
 ```
 
-本地启动：
+`npm install` 会通过 `prepare` 生成 `dist/pi/index.js`。修改 Pi 源码后，可以手动重新构建并启动：
 
 ```bash
+npm run build:pi
 pi -e .
 ```
 

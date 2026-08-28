@@ -2,7 +2,15 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { ArtifactRadar, formatSize, loadArtifactPreview } from "./artifacts.js";
+import {
+  ArtifactRadar,
+  discoverArtifactsFromRoots,
+  formatSize,
+  inferArtifactRoot,
+  loadArtifactPreview,
+  normalizeArtifactRoots,
+  type ArtifactRecord,
+} from "./artifacts.js";
 import { registerResearchCheckpoint } from "./checkpoint.js";
 import { CheckpointViewerServer } from "./checkpoint-server.js";
 import { CheckpointStore } from "./checkpoint-store.js";
@@ -22,8 +30,97 @@ export default function researchLoop(pi: ExtensionAPI): void {
   let radar: ArtifactRadar | undefined;
   let activeContext: ExtensionContext | undefined;
   let viewerExposureWarned = false;
+  let loadedArtifactRoots = new Set<string>();
+  let artifactLoadPromise: Promise<void> | undefined;
+  let radarRoots = "";
+  let artifactRootsDirty = false;
+  let artifactRootPersistTimer: NodeJS.Timeout | undefined;
 
-  const getArtifacts = () => radar?.getArtifacts() ?? runtime.artifacts;
+  const getArtifacts = () => {
+    const merged = new Map<string, ArtifactRecord>();
+    for (const artifact of [...runtime.artifacts, ...(radar?.getArtifacts() ?? [])]) {
+      merged.set(`${artifact.kind}:${artifact.path}`, artifact);
+    }
+    return [...merged.values()].sort((a, b) => a.discoveredAt - b.discoveredAt);
+  };
+  const mergeArtifacts = (records: ArtifactRecord[], ctx?: ExtensionContext) => {
+    const merged = new Map<string, ArtifactRecord>();
+    for (const artifact of [...records, ...runtime.artifacts]) {
+      merged.set(`${artifact.kind}:${artifact.path}`, artifact);
+    }
+    runtime.setArtifacts([...merged.values()], ctx);
+  };
+  const ensureArtifactInventory = async (ctx: ExtensionContext, requestedRoots = runtime.artifactRoots) => {
+    if (artifactLoadPromise) await artifactLoadPromise;
+    const pendingRoots = requestedRoots.filter((root) => !loadedArtifactRoots.has(root));
+    if (pendingRoots.length === 0) return;
+    artifactLoadPromise = (async () => {
+      const discovered = await discoverArtifactsFromRoots(ctx.cwd, pendingRoots);
+      for (const root of pendingRoots) loadedArtifactRoots.add(root);
+      mergeArtifacts(discovered, ctx);
+    })();
+    try {
+      await artifactLoadPromise;
+    } catch (error) {
+      ctx.ui.notify(`Could not rediscover research artifacts: ${String(error)}`, "warning");
+    } finally {
+      artifactLoadPromise = undefined;
+    }
+  };
+  const flushArtifactRoots = () => {
+    if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
+    artifactRootPersistTimer = undefined;
+    if (!artifactRootsDirty) return;
+    artifactRootsDirty = false;
+    runtime.persistControlState();
+  };
+  const scheduleArtifactRoots = () => {
+    artifactRootsDirty = true;
+    if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
+    artifactRootPersistTimer = setTimeout(flushArtifactRoots, 1_000);
+  };
+  const markArtifactRootsPersisted = () => {
+    if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
+    artifactRootPersistTimer = undefined;
+    artifactRootsDirty = false;
+  };
+  const stopRadar = () => {
+    radar?.stop();
+    radar = undefined;
+    radarRoots = "";
+    flushArtifactRoots();
+  };
+  const syncRadar = async (ctx: ExtensionContext) => {
+    if (!runtime.enabled || runtime.workMode !== "experiment") {
+      stopRadar();
+      return;
+    }
+    const roots = runtime.currentArtifactRoots;
+    await ensureArtifactInventory(ctx, roots);
+    const signature = JSON.stringify(roots);
+    if (radar && radarRoots === signature) return;
+    stopRadar();
+    radar = new ArtifactRadar(ctx.cwd, runtime.artifacts, (artifact, isNew) => {
+      runtime.upsertArtifact(artifact, activeContext);
+      if (runtime.addArtifactRoots([inferArtifactRoot(artifact)], activeContext, false)) {
+        scheduleArtifactRoots();
+      }
+      const summary = artifact.kind === "dataset"
+        ? `${artifact.fileCount ?? 0} ${artifact.extension.slice(1).toUpperCase()} files`
+        : formatSize(artifact.size);
+      activeContext?.ui.notify(
+        `${isNew ? "Indexed" : "Updated"} ${artifact.kind}: ${artifact.path} (${summary})`,
+        "info",
+      );
+    }, roots);
+    radarRoots = signature;
+    try {
+      radar.start();
+    } catch (error) {
+      stopRadar();
+      ctx.ui.notify(`Artifact Radar unavailable: ${String(error)}`, "warning");
+    }
+  };
   const warnViewerExposure = (server: CheckpointViewerServer, ctx: ExtensionContext) => {
     if (!server.exposedToNetwork || viewerExposureWarned) return;
     viewerExposureWarned = true;
@@ -32,29 +129,32 @@ export default function researchLoop(pi: ExtensionAPI): void {
       "warning",
     );
   };
+  const startCheckpointViewer = async (ctx: ExtensionContext) => {
+    checkpointStore ??= new CheckpointStore(ctx.cwd);
+    checkpointServer ??= new CheckpointViewerServer(checkpointStore);
+    await checkpointServer.start();
+    warnViewerExposure(checkpointServer, ctx);
+    return checkpointServer;
+  };
 
   registerResearchCheckpoint(pi, {
     getArtifacts,
     async save(draft, artifacts, ctx) {
       checkpointStore ??= new CheckpointStore(ctx.cwd);
       const stored = await checkpointStore.write(draft, artifacts);
-      if (!checkpointServer) {
-        try {
-          checkpointServer = new CheckpointViewerServer(checkpointStore);
-        } catch (error) {
-          ctx.ui.notify(`Checkpoint saved, but Viewer configuration is invalid: ${String(error)}`, "warning");
-          return { stored };
-        }
-      }
       try {
-        await checkpointServer.start();
-        warnViewerExposure(checkpointServer, ctx);
+        const server = await startCheckpointViewer(ctx);
+        return { stored, viewerUrl: server.latestUrl };
       } catch (error) {
         ctx.ui.notify(`Checkpoint saved, but Viewer is unavailable: ${String(error)}`, "warning");
+        return { stored };
       }
-      return { stored, viewerUrl: checkpointServer.latestUrl };
     },
-    onReached: (resultCount, ctx) => runtime.reachCheckpoint(resultCount, ctx),
+    onReached: (resultCount, ctx) => {
+      runtime.reachCheckpoint(resultCount, ctx);
+      markArtifactRootsPersisted();
+      void syncRadar(ctx);
+    },
   });
 
   pi.registerTool({
@@ -76,6 +176,10 @@ export default function researchLoop(pi: ExtensionAPI): void {
         Type.String({ description: "Planned dataset, split, sample count, and scope; required for Experiment Mode" }),
       ),
       reference: Type.Optional(Type.String({ description: "Reference paper, result, or protocol when applicable" })),
+      artifactRoots: Type.Optional(Type.Array(
+        Type.String({ description: "Project-relative experiment output directory" }),
+        { maxItems: 16, description: "Stable output directories to watch and rescan for artifacts" },
+      )),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const experiment = params.mode === "experiment"
@@ -89,9 +193,11 @@ export default function researchLoop(pi: ExtensionAPI): void {
             intent: params.intent,
             plannedDataScope: params.plannedDataScope,
             reference: params.reference,
+            artifactRoots: normalizeArtifactRoots(ctx.cwd, params.artifactRoots ?? []),
           }
         : undefined;
       const decision = runtime.enterMode(params.mode, params.objective, experiment, ctx);
+      if (!decision.block) await syncRadar(ctx);
       const text = decision.block
         ? decision.reason ?? "Mode transition rejected."
         : `Research Work Mode: ${params.mode.toUpperCase()}\nObjective: ${params.objective}`;
@@ -113,6 +219,10 @@ export default function researchLoop(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const decision = runtime.abortExperiment(params.reason, ctx);
+      if (!decision.block) {
+        markArtifactRootsPersisted();
+        await syncRadar(ctx);
+      }
       return {
         content: [{
           type: "text" as const,
@@ -137,6 +247,8 @@ export default function researchLoop(pi: ExtensionAPI): void {
       const value = args.trim().toLowerCase();
       if (value === "on" || value === "off") {
         runtime.setEnabled(value === "on", ctx);
+        markArtifactRootsPersisted();
+        await syncRadar(ctx);
         return;
       }
       ctx.ui.notify(`Research Loop: ${runtime.enabled ? "ON" : "OFF"}. Usage: /research on|off`, "info");
@@ -146,6 +258,7 @@ export default function researchLoop(pi: ExtensionAPI): void {
   pi.registerCommand("artifacts", {
     description: "List and preview artifacts from the current research session",
     handler: async (_args, ctx) => {
+      await ensureArtifactInventory(ctx);
       const artifacts = getArtifacts();
       if (artifacts.length === 0) {
         ctx.ui.notify("No research artifacts discovered in this session.", "info");
@@ -202,52 +315,59 @@ export default function researchLoop(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("checkpoint-viewer", {
+    description: "Start the persistent Checkpoint Viewer and show its latest URL",
+    handler: async (_args, ctx) => {
+      try {
+        const server = await startCheckpointViewer(ctx);
+        ctx.ui.notify(`Checkpoint Viewer: ${server.latestUrl ?? server.origin}`, "info");
+      } catch (error) {
+        ctx.ui.notify(`Checkpoint Viewer unavailable: ${String(error)}`, "warning");
+      }
+    },
+  });
+
   pi.events.on(ASK_USER_BLOCKED_EVENT, (payload: unknown) => {
     if (!activeContext || !payload || typeof payload !== "object") return;
     const active = (payload as { active?: unknown }).active;
     if (typeof active === "boolean") runtime.setUserDecisionPending(active, activeContext);
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     activeContext = ctx;
     viewerExposureWarned = false;
-    runtime.startSession(ctx);
-    checkpointStore = new CheckpointStore(ctx.cwd);
-    try {
-      checkpointServer = new CheckpointViewerServer(checkpointStore);
-      void checkpointServer.start().then(() => {
-        if (checkpointServer) warnViewerExposure(checkpointServer, ctx);
-      }).catch((error) => {
-        ctx.ui.notify(`Checkpoint Viewer unavailable: ${String(error)}`, "warning");
-      });
-    } catch (error) {
-      checkpointServer = undefined;
-      ctx.ui.notify(`Checkpoint Viewer configuration is invalid: ${String(error)}`, "warning");
+    loadedArtifactRoots = new Set();
+    artifactLoadPromise = undefined;
+    if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
+    artifactRootPersistTimer = undefined;
+    artifactRootsDirty = false;
+    const restored = runtime.startSession(ctx);
+    if (restored.embeddedArtifacts) {
+      runtime.addArtifactRoots(runtime.artifacts.map(inferArtifactRoot), undefined, false);
+      for (const root of runtime.artifactRoots) loadedArtifactRoots.add(root);
+      runtime.persistControlState();
+      if (runtime.artifacts.length >= 100) {
+        ctx.ui.notify(
+          "Legacy artifact state was migrated to roots-only persistence. Existing JSONL history is unchanged; start a new session once to remove its previous startup cost.",
+          "warning",
+        );
+      }
     }
+    checkpointStore = undefined;
+    checkpointServer = undefined;
 
-    radar?.stop();
-    radar = new ArtifactRadar(ctx.cwd, runtime.artifacts, (artifact, isNew) => {
-      runtime.setArtifacts(getArtifacts(), activeContext);
-      const summary = artifact.kind === "dataset"
-        ? `${artifact.fileCount ?? 0} ${artifact.extension.slice(1).toUpperCase()} files`
-        : formatSize(artifact.size);
-      activeContext?.ui.notify(
-        `${isNew ? "Indexed" : "Updated"} ${artifact.kind}: ${artifact.path} (${summary})`,
-        "info",
-      );
-    });
-
-    try {
-      radar.start();
-    } catch (error) {
-      ctx.ui.notify(`Artifact Radar unavailable: ${String(error)}`, "warning");
-    }
+    stopRadar();
+    await syncRadar(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     runtime.clearStatus(ctx);
-    radar?.stop();
-    radar = undefined;
+    stopRadar();
+    loadedArtifactRoots.clear();
+    artifactLoadPromise = undefined;
+    if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
+    artifactRootPersistTimer = undefined;
+    artifactRootsDirty = false;
     activeContext = undefined;
     await checkpointServer?.stop();
     checkpointServer = undefined;

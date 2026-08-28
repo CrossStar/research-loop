@@ -48,8 +48,10 @@ const experiment = {
   question: "Does optimizer A converge faster than B?",
   intent: "exploratory",
   plannedDataScope: "validation split, 100 samples, one seed",
+  artifactRoots: ["runs/optimizer-comparison", "runs/optimizer-comparison/figures"],
 };
 assert.equal(core.enterMode("experiment", "Measure convergence", experiment).block, false);
+assert.deepEqual(core.artifactRoots, ["runs/optimizer-comparison"]);
 const scheduledRun = core.evaluateToolCall("Bash", {
   command: "sbatch repro/official_models/eval_obfuscated_activations.sbatch",
 });

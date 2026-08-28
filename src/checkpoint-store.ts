@@ -59,8 +59,6 @@ export interface CheckpointArtifactInput {
 export interface PreparedCheckpointArtifact extends CheckpointArtifactInput {
   artifact: ArtifactRecord;
   absolutePath: string;
-  preview?: string;
-  image?: { data: string; mimeType: string };
 }
 
 export interface CheckpointDraft {
