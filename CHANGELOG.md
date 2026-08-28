@@ -2,6 +2,13 @@
 
 All notable changes to Research Loop are documented in this file.
 
+## 0.5.3 - 2026-08-28
+
+### Pi package installation
+
+- Remove the package `prepare` hook so Pi installations that omit development dependencies do not try to import the development-only `esbuild` package.
+- Continue loading the checked-in `dist/pi/index.js`; `npm run build:pi` remains an explicit contributor command.
+
 ## 0.5.2 - 2026-08-28
 
 ### Pi session performance

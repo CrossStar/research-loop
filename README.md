@@ -37,7 +37,7 @@ pi install -l git:github.com/CrossStar/research-loop
 固定到某个 release：
 
 ```bash
-pi install git:github.com/CrossStar/research-loop@research-loop--v0.5.2
+pi install git:github.com/CrossStar/research-loop@research-loop--v0.5.3
 ```
 
 > Pi package 会以当前用户权限运行。安装第三方扩展前应检查源码。
@@ -471,7 +471,8 @@ npm run check
 npm run test:pi
 ```
 
-`npm install` 会通过 `prepare` 生成 `dist/pi/index.js`。修改 Pi 源码后，可以手动重新构建并启动：
+发布包直接加载仓库中已生成的 `dist/pi/index.js`，安装过程不执行构建脚本。开发者修改 Pi 源码后，
+需要手动重新构建并启动：
 
 ```bash
 npm run build:pi

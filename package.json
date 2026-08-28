@@ -1,6 +1,6 @@
 {
   "name": "research-loop",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "An evidence-first research loop for Pi and Claude Code",
   "type": "module",
   "private": true,
@@ -18,7 +18,6 @@
   "scripts": {
     "build:pi": "node scripts/build-pi.mjs",
     "build:claude": "tsc -p tsconfig.claude.json && node scripts/build-claude.mjs",
-    "prepare": "npm run build:pi",
     "check": "tsc --noEmit",
     "check:claude": "npm run build:claude && claude plugin validate --strict .",
     "statusline:install": "npm run build:claude && node dist/claude/statusline-cli.js install",

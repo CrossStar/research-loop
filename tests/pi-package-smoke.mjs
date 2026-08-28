@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const manifest = JSON.parse(await readFile("package.json", "utf8"));
 assert.deepEqual(manifest.pi?.extensions, ["./dist/pi/index.js"]);
+assert.equal(manifest.scripts?.prepare, undefined);
 const extensionPath = resolve("dist/pi/index.js");
 const templatePath = resolve("dist/pi/checkpoint-report-template.html");
 await access(extensionPath);
