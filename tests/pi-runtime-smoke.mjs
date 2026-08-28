@@ -192,7 +192,8 @@ const restored = restoredRuntime.startSession({
   },
 });
 assert.equal(restored.embeddedArtifacts, true);
-assert.equal(restoredRuntime.artifacts.length, 1);
+assert.equal(restored.legacyArtifacts.length, 1);
+assert.equal(restoredRuntime.artifacts.length, 0);
 restoredRuntime.persistControlState();
 assert.equal(Object.hasOwn(entries.at(-1).data, "artifacts"), false);
 

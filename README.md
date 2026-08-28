@@ -321,9 +321,13 @@ Checkpoint Writer 只记录引用。图片、表格和模型输出不会复制�
 写入 Markdown 或 session tool details。展开 TUI Checkpoint 结果时，图片预览才从原文件按需读取。
 
 Pi session 的 `research-loop-state` 只保存体积很小的控制状态和 `artifactRoots`，不会保存完整
-artifact inventory。恢复 session 后，插件仅在需要 `/artifacts`、恢复中的 Experiment 或进入新
-Experiment 时扫描这些明确目录。Artifact Radar 也只在 Experiment Mode 存活；关闭 Research Loop、
-进入只读模式或完成 Checkpoint 后会立即停止递归 watcher。
+artifact inventory。`session_start` 只恢复控制状态、tools 和 footer，随后立即返回；artifact
+rediscovery 与 Radar 初始化在带 session generation 和 AbortSignal 的后台任务中执行。切换或关闭
+session 会取消旧任务，旧扫描结果无法写入新 session。
+
+Artifact Radar 只在 Experiment Mode 且存在明确 `artifactRoots` 时运行。空 roots 不会退化为对
+整个项目执行 recursive `fs.watch`。关闭 Research Loop、进入只读模式或完成 Checkpoint 后会立即
+停止 watchers。
 
 持久化状态保持为类似以下的小对象：
 
@@ -341,9 +345,28 @@ Experiment 时扫描这些明确目录。Artifact Radar 也只在 Experiment Mod
 artifactRoots: ["results/seed_bimodality/run-20260828-2314"]
 ```
 
-没有显式目录时，Radar 会从实际产物路径推断 run directory，并把少量 root paths 写入控制状态。
-旧 session 中已经嵌入的 artifact 快照会在首次加载后迁移成 roots-only 新状态；旧 JSONL 的历史行
-仍保留在原文件中，新写入的状态不会继续放大它。
+没有显式目录时 Radar 保持关闭；Checkpoint 中明确登记的 artifact 会用于推断并保存安全的 run
+root。项目根目录中的 `summary.json` 会保留为单文件 root `summary.json`，不会转换为 `.`。
+
+Root normalization、watcher events 和 rediscovery traversal 共用同一套路径策略：
+
+1. 固定排除 `.git`、`.pi`、`.claude`、`node_modules` 和 `__pycache__`；
+2. 通过 `pyvenv.cfg`、项目内 `VIRTUAL_ENV`、`CONDA_PREFIX` 和 venv 名称 fallback 排除 Python 环境；
+3. 应用项目根目录中的 `.research-loopignore`。
+
+`.research-loopignore` 使用 gitignore-compatible 语法，例如：
+
+```gitignore
+# 项目自己的 cache、vendor 和临时评估目录
+.cache/
+vendor/
+scratch-evals/
+**/debug-dumps/
+```
+
+旧 session 的 roots 和 embedded artifact migration 也会经过同一 sanitizer，因此
+`.venv-train/.../site-packages` 等历史污染路径会在首次恢复时从最新控制状态中移除。旧 JSONL 的
+历史行仍保留在原文件中，新写入的状态不会继续放大它。
 
 如果 `chafa` 在 `PATH` 中：
 

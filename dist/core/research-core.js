@@ -106,6 +106,23 @@ export class ResearchCore {
         else
             this.state.artifacts.push({ ...artifact });
     }
+    setArtifactRoots(roots, currentExperimentRoots) {
+        const normalized = compactArtifactRoots(roots);
+        let changed = normalized.length !== this.state.artifactRoots.length
+            || normalized.some((root, index) => root !== this.state.artifactRoots[index]);
+        if (changed)
+            this.state.artifactRoots = normalized;
+        if (this.state.workMode === "experiment" && this.state.experiment && currentExperimentRoots) {
+            const current = compactArtifactRoots(currentExperimentRoots);
+            const experimentChanged = current.length !== (this.state.experiment.artifactRoots?.length ?? 0)
+                || current.some((root, index) => root !== this.state.experiment.artifactRoots?.[index]);
+            if (experimentChanged) {
+                this.state.experiment.artifactRoots = current;
+                changed = true;
+            }
+        }
+        return changed;
+    }
     addArtifactRoots(roots) {
         const compacted = compactArtifactRoots([...this.state.artifactRoots, ...roots]);
         const stateChanged = compacted.length !== this.state.artifactRoots.length
@@ -363,7 +380,7 @@ function compactArtifactRoots(roots) {
         .sort((a, b) => a.length - b.length || a.localeCompare(b));
     const compacted = [];
     for (const root of normalized) {
-        if (compacted.some((parent) => parent === "." || root === parent || root.startsWith(`${parent}/`)))
+        if (compacted.some((parent) => root === parent || root.startsWith(`${parent}/`)))
             continue;
         compacted.push(root);
     }

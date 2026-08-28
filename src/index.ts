@@ -4,6 +4,7 @@ import { Container, Key, matchesKey, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   ArtifactRadar,
+  createArtifactRootNormalizer,
   discoverArtifactsFromRoots,
   formatSize,
   inferArtifactRoot,
@@ -31,7 +32,9 @@ export default function researchLoop(pi: ExtensionAPI): void {
   let activeContext: ExtensionContext | undefined;
   let viewerExposureWarned = false;
   let loadedArtifactRoots = new Set<string>();
-  let artifactLoadPromise: Promise<void> | undefined;
+  let artifactLoadTask: { generation: number; promise: Promise<void> } | undefined;
+  let artifactAbortController: AbortController | undefined;
+  let sessionGeneration = 0;
   let radarRoots = "";
   let artifactRootsDirty = false;
   let artifactRootPersistTimer: NodeJS.Timeout | undefined;
@@ -50,21 +53,37 @@ export default function researchLoop(pi: ExtensionAPI): void {
     }
     runtime.setArtifacts([...merged.values()], ctx);
   };
-  const ensureArtifactInventory = async (ctx: ExtensionContext, requestedRoots = runtime.artifactRoots) => {
-    if (artifactLoadPromise) await artifactLoadPromise;
+  const isCurrentSession = (ctx: ExtensionContext, generation: number, signal: AbortSignal) => (
+    generation === sessionGeneration && activeContext === ctx && !signal.aborted
+  );
+  const ensureArtifactInventory = async (
+    ctx: ExtensionContext,
+    requestedRoots = runtime.artifactRoots,
+    generation = sessionGeneration,
+    signal = artifactAbortController?.signal,
+  ) => {
+    if (!signal || !isCurrentSession(ctx, generation, signal)) return;
+    if (artifactLoadTask?.generation === generation) await artifactLoadTask.promise;
+    if (!isCurrentSession(ctx, generation, signal)) return;
     const pendingRoots = requestedRoots.filter((root) => !loadedArtifactRoots.has(root));
     if (pendingRoots.length === 0) return;
-    artifactLoadPromise = (async () => {
-      const discovered = await discoverArtifactsFromRoots(ctx.cwd, pendingRoots);
+
+    const promise = (async () => {
+      const discovered = await discoverArtifactsFromRoots(ctx.cwd, pendingRoots, signal);
+      if (!isCurrentSession(ctx, generation, signal)) return;
       for (const root of pendingRoots) loadedArtifactRoots.add(root);
       mergeArtifacts(discovered, ctx);
     })();
+    const task = { generation, promise };
+    artifactLoadTask = task;
     try {
-      await artifactLoadPromise;
+      await promise;
     } catch (error) {
-      ctx.ui.notify(`Could not rediscover research artifacts: ${String(error)}`, "warning");
+      if (isCurrentSession(ctx, generation, signal)) {
+        ctx.ui.notify(`Could not rediscover research artifacts: ${String(error)}`, "warning");
+      }
     } finally {
-      artifactLoadPromise = undefined;
+      if (artifactLoadTask === task) artifactLoadTask = undefined;
     }
   };
   const flushArtifactRoots = () => {
@@ -77,7 +96,10 @@ export default function researchLoop(pi: ExtensionAPI): void {
   const scheduleArtifactRoots = () => {
     artifactRootsDirty = true;
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
-    artifactRootPersistTimer = setTimeout(flushArtifactRoots, 1_000);
+    const generation = sessionGeneration;
+    artifactRootPersistTimer = setTimeout(() => {
+      if (generation === sessionGeneration) flushArtifactRoots();
+    }, 1_000);
   };
   const markArtifactRootsPersisted = () => {
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
@@ -90,35 +112,58 @@ export default function researchLoop(pi: ExtensionAPI): void {
     radarRoots = "";
     flushArtifactRoots();
   };
-  const syncRadar = async (ctx: ExtensionContext) => {
+  const syncRadar = async (
+    ctx: ExtensionContext,
+    generation = sessionGeneration,
+    signal = artifactAbortController?.signal,
+  ) => {
+    if (!signal || !isCurrentSession(ctx, generation, signal)) return;
     if (!runtime.enabled || runtime.workMode !== "experiment") {
       stopRadar();
       return;
     }
-    const roots = runtime.currentArtifactRoots;
-    await ensureArtifactInventory(ctx, roots);
-    const signature = JSON.stringify(roots);
+    const normalizeRoots = createArtifactRootNormalizer(ctx.cwd);
+    const roots = normalizeRoots(runtime.currentArtifactRoots);
+    if (roots.length === 0) {
+      stopRadar();
+      return;
+    }
+    await ensureArtifactInventory(ctx, roots, generation, signal);
+    if (
+      !isCurrentSession(ctx, generation, signal)
+      || !runtime.enabled
+      || runtime.workMode !== "experiment"
+    ) return;
+    const currentRoots = normalizeRoots(runtime.currentArtifactRoots);
+    const signature = JSON.stringify(currentRoots);
+    if (signature !== JSON.stringify(roots)) {
+      await syncRadar(ctx, generation, signal);
+      return;
+    }
     if (radar && radarRoots === signature) return;
     stopRadar();
+    if (!isCurrentSession(ctx, generation, signal)) return;
     radar = new ArtifactRadar(ctx.cwd, runtime.artifacts, (artifact, isNew) => {
-      runtime.upsertArtifact(artifact, activeContext);
-      if (runtime.addArtifactRoots([inferArtifactRoot(artifact)], activeContext, false)) {
-        scheduleArtifactRoots();
-      }
+      if (!isCurrentSession(ctx, generation, signal)) return;
+      runtime.upsertArtifact(artifact, ctx);
+      const inferredRoot = normalizeRoots([inferArtifactRoot(artifact)]);
+      if (runtime.addArtifactRoots(inferredRoot, ctx, false)) scheduleArtifactRoots();
       const summary = artifact.kind === "dataset"
         ? `${artifact.fileCount ?? 0} ${artifact.extension.slice(1).toUpperCase()} files`
         : formatSize(artifact.size);
-      activeContext?.ui.notify(
+      ctx.ui.notify(
         `${isNew ? "Indexed" : "Updated"} ${artifact.kind}: ${artifact.path} (${summary})`,
         "info",
       );
-    }, roots);
+    }, currentRoots);
     radarRoots = signature;
     try {
       radar.start();
     } catch (error) {
       stopRadar();
-      ctx.ui.notify(`Artifact Radar unavailable: ${String(error)}`, "warning");
+      if (isCurrentSession(ctx, generation, signal)) {
+        ctx.ui.notify(`Artifact Radar unavailable: ${String(error)}`, "warning");
+      }
     }
   };
   const warnViewerExposure = (server: CheckpointViewerServer, ctx: ExtensionContext) => {
@@ -142,6 +187,11 @@ export default function researchLoop(pi: ExtensionAPI): void {
     async save(draft, artifacts, ctx) {
       checkpointStore ??= new CheckpointStore(ctx.cwd);
       const stored = await checkpointStore.write(draft, artifacts);
+      const registeredRoots = normalizeArtifactRoots(
+        ctx.cwd,
+        artifacts.map((item) => inferArtifactRoot(item.artifact)),
+      );
+      runtime.addArtifactRoots(registeredRoots, undefined, false);
       try {
         const server = await startCheckpointViewer(ctx);
         return { stored, viewerUrl: server.latestUrl };
@@ -333,38 +383,75 @@ export default function researchLoop(pi: ExtensionAPI): void {
     if (typeof active === "boolean") runtime.setUserDecisionPending(active, activeContext);
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    activeContext = ctx;
-    viewerExposureWarned = false;
-    loadedArtifactRoots = new Set();
-    artifactLoadPromise = undefined;
+  pi.on("session_start", (_event, ctx) => {
+    artifactAbortController?.abort();
+    radar?.stop();
+    radar = undefined;
+    radarRoots = "";
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
     artifactRootPersistTimer = undefined;
     artifactRootsDirty = false;
+
+    const generation = ++sessionGeneration;
+    const controller = new AbortController();
+    artifactAbortController = controller;
+    activeContext = ctx;
+    viewerExposureWarned = false;
+    loadedArtifactRoots = new Set();
+    artifactLoadTask = undefined;
+
     const restored = runtime.startSession(ctx);
-    if (restored.embeddedArtifacts) {
-      runtime.addArtifactRoots(runtime.artifacts.map(inferArtifactRoot), undefined, false);
-      for (const root of runtime.artifactRoots) loadedArtifactRoots.add(root);
-      runtime.persistControlState();
-      if (runtime.artifacts.length >= 100) {
-        ctx.ui.notify(
-          "Legacy artifact state was migrated to roots-only persistence. Existing JSONL history is unchanged; start a new session once to remove its previous startup cost.",
-          "warning",
-        );
-      }
-    }
+    const normalizeRoots = createArtifactRootNormalizer(ctx.cwd);
+    const sanitizedRoots = normalizeRoots(runtime.artifactRoots);
+    const sanitizedCurrentRoots = normalizeRoots(runtime.currentArtifactRoots);
+    const controlStateChanged = runtime.setArtifactRoots(sanitizedRoots, sanitizedCurrentRoots, false);
+    if (restored.embeddedArtifacts || controlStateChanged) runtime.persistControlState();
     checkpointStore = undefined;
     checkpointServer = undefined;
 
-    stopRadar();
-    await syncRadar(ctx);
+    setImmediate(() => {
+      void (async () => {
+        if (!isCurrentSession(ctx, generation, controller.signal)) return;
+        if (restored.embeddedArtifacts) {
+          const sanitizedArtifacts: ArtifactRecord[] = [];
+          for (let index = 0; index < restored.legacyArtifacts.length; index += 1) {
+            if (index % 200 === 0) {
+              await new Promise<void>((resolveYield) => setImmediate(resolveYield));
+              if (!isCurrentSession(ctx, generation, controller.signal)) return;
+            }
+            const artifact = restored.legacyArtifacts[index];
+            if (artifact && normalizeRoots([inferArtifactRoot(artifact)]).length > 0) {
+              sanitizedArtifacts.push(artifact);
+            }
+          }
+          if (!isCurrentSession(ctx, generation, controller.signal)) return;
+          runtime.setArtifacts(sanitizedArtifacts, ctx);
+          const migratedRoots = normalizeRoots(sanitizedArtifacts.map(inferArtifactRoot));
+          if (runtime.addArtifactRoots(migratedRoots, undefined, false)) runtime.persistControlState();
+          if (sanitizedArtifacts.length >= 100) {
+            ctx.ui.notify(
+              "Legacy artifact state was migrated to roots-only persistence. Existing JSONL history is unchanged; start a new session once to remove its previous startup cost.",
+              "warning",
+            );
+          }
+        }
+        await syncRadar(ctx, generation, controller.signal);
+      })().catch((error) => {
+        if (isCurrentSession(ctx, generation, controller.signal)) {
+          ctx.ui.notify(`Artifact background initialization failed: ${String(error)}`, "warning");
+        }
+      });
+    });
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     runtime.clearStatus(ctx);
     stopRadar();
+    artifactAbortController?.abort();
+    artifactAbortController = undefined;
+    sessionGeneration += 1;
     loadedArtifactRoots.clear();
-    artifactLoadPromise = undefined;
+    artifactLoadTask = undefined;
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
     artifactRootPersistTimer = undefined;
     artifactRootsDirty = false;

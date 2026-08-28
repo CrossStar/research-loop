@@ -1,10 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveArtifactMetadata, SUPPORTED_ARTIFACT_EXTENSIONS } from "./core/artifacts.js";
+import {
+  isHardIgnoredArtifactDirectory,
+  isVirtualEnvironmentDirectoryName,
+  resolveArtifactMetadata,
+  SUPPORTED_ARTIFACT_EXTENSIONS,
+} from "./core/artifacts.js";
 import type { ArtifactMetadata } from "./core/types.js";
-import { createReadStream, existsSync, realpathSync, statSync, type FSWatcher, watch } from "node:fs";
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync, type FSWatcher, watch } from "node:fs";
 import { open, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
+import ignore, { type Ignore } from "ignore";
 import { formatTable } from "./table.js";
 
 export type { ArtifactKind } from "./core/types.js";
@@ -20,7 +26,7 @@ const IMAGE_MIME: Record<string, string> = {
   ".jpeg": "image/jpeg",
 };
 
-const IGNORED_DIRECTORIES = new Set([".git", ".pi", ".claude", "node_modules", ".venv", "venv", "__pycache__"]);
+const RESEARCH_LOOP_IGNORE_FILE = ".research-loopignore";
 const CONVENTIONAL_ARTIFACT_SUBDIRECTORIES = new Set([
   "figures",
   "plots",
@@ -45,8 +51,69 @@ export interface ArtifactPreview {
   image?: { data: string; mimeType: string };
 }
 
+class ArtifactPathPolicy {
+  private readonly project: string;
+  private readonly ignoredEnvironmentRoots: string[];
+  private readonly checkedEnvironmentMarkers = new Map<string, boolean>();
+  private readonly ignoreRules: Ignore | undefined;
+
+  constructor(cwd: string) {
+    this.project = resolve(cwd);
+    this.ignoredEnvironmentRoots = [process.env.VIRTUAL_ENV, process.env.CONDA_PREFIX]
+      .filter((value): value is string => Boolean(value?.trim()))
+      .map((value) => this.projectRelative(value))
+      .filter((value): value is string => Boolean(value));
+    try {
+      const rules = readFileSync(resolve(this.project, RESEARCH_LOOP_IGNORE_FILE), "utf8");
+      this.ignoreRules = ignore().add(rules);
+    } catch {
+      this.ignoreRules = undefined;
+    }
+  }
+
+  isIgnored(relativePath: string, directory = false): boolean {
+    const normalized = toPosixRelative(relativePath);
+    if (!normalized) return false;
+    if (normalized === ".." || normalized.startsWith("../")) return true;
+    const parts = normalized.split("/");
+    if (parts.some(isHardIgnoredArtifactDirectory)) return true;
+    if (this.ignoredEnvironmentRoots.some((root) => normalized === root || normalized.startsWith(`${root}/`))) {
+      return true;
+    }
+    if (this.isInsideMarkedPythonEnvironment(parts, directory)) return true;
+    if (parts.some(isVirtualEnvironmentDirectoryName)) return true;
+    return this.ignoreRules?.ignores(directory ? `${normalized}/` : normalized) ?? false;
+  }
+
+  private isInsideMarkedPythonEnvironment(parts: string[], directory: boolean): boolean {
+    const limit = directory ? parts.length : Math.max(0, parts.length - 1);
+    for (let length = 1; length <= limit; length += 1) {
+      const candidate = parts.slice(0, length).join("/");
+      let ignored = this.checkedEnvironmentMarkers.get(candidate);
+      if (ignored === undefined) {
+        const absolute = resolve(this.project, candidate);
+        ignored = existsSync(resolve(absolute, "pyvenv.cfg"));
+        if (ignored || existsSync(absolute)) this.checkedEnvironmentMarkers.set(candidate, ignored);
+      }
+      if (ignored) return true;
+    }
+    return false;
+  }
+
+  private projectRelative(input: string): string | undefined {
+    const absolute = resolve(this.project, input.trim());
+    const candidate = relative(this.project, absolute);
+    if (!candidate || candidate === ".." || candidate.startsWith(`..${sep}`) || isAbsolute(candidate)) {
+      return undefined;
+    }
+    return candidate.split(sep).join("/");
+  }
+}
+
 export class ArtifactRadar {
   private watchers: FSWatcher[] = [];
+  private watcherSignature = "";
+  private rootRefreshTimer: NodeJS.Timeout | undefined;
   private stopped = true;
   private captureDepth = 0;
   private records: ArtifactRecord[];
@@ -54,6 +121,7 @@ export class ArtifactRadar {
   private pendingDatasetEmits = new Map<string, NodeJS.Timeout>();
   private pendingNewDatasets = new Set<string>();
   private datasetMembers = new Map<string, Map<string, { size: number; mtimeMs: number }>>();
+  private readonly pathPolicy: ArtifactPathPolicy;
 
   constructor(
     private readonly cwd: string,
@@ -62,21 +130,26 @@ export class ArtifactRadar {
     private readonly artifactRoots: string[] = [],
   ) {
     this.records = [...initialRecords];
+    this.pathPolicy = new ArtifactPathPolicy(cwd);
   }
 
   start(): void {
-    if (this.watchers.length > 0) return;
+    if (!this.stopped) return;
     this.stopped = false;
     try {
-      for (const target of resolveWatchTargets(this.cwd, this.artifactRoots)) {
-        const watcher = watch(target, { recursive: true }, (_event, filename) => {
-          if (this.captureDepth === 0 || !filename) return;
-          const relativePath = relative(this.cwd, resolve(target, filename.toString())).split(sep).join("/");
-          if (!isWithinRoots(relativePath, this.artifactRoots) || !isCandidate(relativePath)) return;
-          this.queue(relativePath);
-        });
-        watcher.on("error", () => this.stop());
-        this.watchers.push(watcher);
+      const hasMissingRoots = this.refreshWatchers();
+      if (hasMissingRoots) {
+        this.rootRefreshTimer = setInterval(() => {
+          try {
+            if (!this.refreshWatchers() && this.rootRefreshTimer) {
+              clearInterval(this.rootRefreshTimer);
+              this.rootRefreshTimer = undefined;
+            }
+          } catch {
+            this.stop();
+          }
+        }, 250);
+        this.rootRefreshTimer.unref();
       }
     } catch (error) {
       this.stop();
@@ -86,12 +159,39 @@ export class ArtifactRadar {
 
   stop(): void {
     this.stopped = true;
+    if (this.rootRefreshTimer) clearInterval(this.rootRefreshTimer);
+    this.rootRefreshTimer = undefined;
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
+    this.watcherSignature = "";
     for (const timer of [...this.pending.values(), ...this.pendingDatasetEmits.values()]) clearTimeout(timer);
     this.pending.clear();
     this.pendingDatasetEmits.clear();
     this.pendingNewDatasets.clear();
+  }
+
+  private refreshWatchers(): boolean {
+    if (this.stopped) return false;
+    const targets = resolveArtifactWatchTargets(this.cwd, this.artifactRoots, this.pathPolicy);
+    const signature = JSON.stringify(targets);
+    if (signature === this.watcherSignature) return targets.length < this.artifactRoots.length;
+    for (const watcher of this.watchers) watcher.close();
+    this.watchers = [];
+    this.watcherSignature = signature;
+    for (const target of targets) {
+      const watcher = watch(target.path, { recursive: target.recursive }, (_event, filename) => {
+        if (this.captureDepth === 0 || !filename) return;
+        const relativePath = relative(this.cwd, resolve(target.eventBase, filename.toString())).split(sep).join("/");
+        if (
+          !isWithinRoots(relativePath, this.artifactRoots)
+          || !isCandidate(relativePath, this.pathPolicy)
+        ) return;
+        this.queue(relativePath);
+      });
+      watcher.on("error", () => this.stop());
+      this.watchers.push(watcher);
+    }
+    return targets.length < this.artifactRoots.length;
   }
 
   beginCapture(): void {
@@ -205,7 +305,20 @@ export async function resolveArtifactRecord(cwd: string, inputPath: string): Pro
   return resolveArtifactMetadata(cwd, inputPath);
 }
 
+export function createArtifactRootNormalizer(cwd: string): (inputs: string[]) => string[] {
+  const pathPolicy = new ArtifactPathPolicy(cwd);
+  return (inputs) => normalizeArtifactRootsWithPolicy(cwd, inputs, pathPolicy);
+}
+
 export function normalizeArtifactRoots(cwd: string, inputs: string[]): string[] {
+  return createArtifactRootNormalizer(cwd)(inputs);
+}
+
+function normalizeArtifactRootsWithPolicy(
+  cwd: string,
+  inputs: string[],
+  pathPolicy: ArtifactPathPolicy,
+): string[] {
   const project = resolve(cwd);
   const projectReal = realpathSync(project);
   const normalized: string[] = [];
@@ -213,13 +326,31 @@ export function normalizeArtifactRoots(cwd: string, inputs: string[]): string[] 
     if (typeof input !== "string" || !input.trim()) continue;
     const absolute = resolve(project, input.trim());
     const projectRelative = relative(project, absolute);
-    if (projectRelative === ".." || projectRelative.startsWith(`..${sep}`) || isAbsolute(projectRelative)) continue;
-    if (existsSync(absolute)) {
-      const resolvedTarget = realpathSync(absolute);
-      const realRelative = relative(projectReal, resolvedTarget);
-      if (realRelative === ".." || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative)) continue;
+    if (
+      !projectRelative
+      || projectRelative === "."
+      || projectRelative === ".."
+      || projectRelative.startsWith(`..${sep}`)
+      || isAbsolute(projectRelative)
+    ) continue;
+    const exists = existsSync(absolute);
+    let directory = true;
+    try {
+      if (exists) directory = statSync(absolute).isDirectory();
+    } catch {
+      continue;
     }
-    normalized.push((projectRelative || ".").split(sep).join("/"));
+    if (pathPolicy.isIgnored(projectRelative, directory)) continue;
+    if (exists) {
+      try {
+        const resolvedTarget = realpathSync(absolute);
+        const realRelative = relative(projectReal, resolvedTarget);
+        if (realRelative === ".." || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative)) continue;
+      } catch {
+        continue;
+      }
+    }
+    normalized.push(projectRelative.split(sep).join("/"));
   }
   return compactRoots(normalized);
 }
@@ -227,12 +358,18 @@ export function normalizeArtifactRoots(cwd: string, inputs: string[]): string[] 
 export function inferArtifactRoot(record: ArtifactRecord): string {
   if (record.kind === "dataset") return stripConventionalLeaf(record.path);
   const directory = dirname(record.path).split(sep).join("/");
-  return directory === "." ? "." : stripConventionalLeaf(directory);
+  return directory === "." ? record.path : stripConventionalLeaf(directory);
 }
 
 /** Rebuild the ephemeral inventory by scanning only explicit, project-local artifact roots. */
-export async function discoverArtifactsFromRoots(cwd: string, inputs: string[]): Promise<ArtifactRecord[]> {
-  const roots = normalizeArtifactRoots(cwd, inputs);
+export async function discoverArtifactsFromRoots(
+  cwd: string,
+  inputs: string[],
+  signal?: AbortSignal,
+): Promise<ArtifactRecord[]> {
+  signal?.throwIfAborted();
+  const pathPolicy = new ArtifactPathPolicy(cwd);
+  const roots = normalizeArtifactRootsWithPolicy(cwd, inputs, pathPolicy);
   const projectReal = await realpath(cwd);
   const files = new Map<string, ArtifactRecord>();
   const datasets = new Map<string, {
@@ -244,8 +381,9 @@ export async function discoverArtifactsFromRoots(cwd: string, inputs: string[]):
   }>();
 
   const inspectFile = async (absolutePath: string) => {
+    signal?.throwIfAborted();
     const normalizedPath = relative(projectReal, absolutePath).split(sep).join("/");
-    if (!isCandidate(normalizedPath)) return;
+    if (!isCandidate(normalizedPath, pathPolicy)) return;
     const fileStat = await stat(absolutePath);
     if (!fileStat.isFile()) return;
     const extension = extname(normalizedPath).toLowerCase();
@@ -273,6 +411,7 @@ export async function discoverArtifactsFromRoots(cwd: string, inputs: string[]):
   };
 
   for (const root of roots) {
+    signal?.throwIfAborted();
     const absoluteRoot = resolve(cwd, root);
     let rootStat;
     try {
@@ -288,17 +427,22 @@ export async function discoverArtifactsFromRoots(cwd: string, inputs: string[]):
 
       const queue = [resolvedRoot];
       while (queue.length > 0) {
+        signal?.throwIfAborted();
         const directory = queue.shift();
         if (!directory) break;
         const handle = await opendir(directory);
         for await (const entry of handle) {
+          signal?.throwIfAborted();
           const absoluteEntry = resolve(directory, entry.name);
           if (entry.isDirectory()) {
-            if (!IGNORED_DIRECTORIES.has(entry.name)) queue.push(absoluteEntry);
+            const relativeEntry = relative(projectReal, absoluteEntry).split(sep).join("/");
+            if (!pathPolicy.isIgnored(relativeEntry, true)) queue.push(absoluteEntry);
           } else if (entry.isFile()) await inspectFile(absoluteEntry);
         }
       }
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) signal.throwIfAborted();
+      if (error instanceof Error && error.name === "AbortError") throw error;
       continue;
     }
   }
@@ -390,6 +534,10 @@ export function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function toPosixRelative(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
+}
+
 function compactRoots(roots: string[]): string[] {
   const ordered = [...new Set(roots)].sort((a, b) => a.length - b.length || a.localeCompare(b));
   const compacted: string[] = [];
@@ -415,31 +563,48 @@ function stripConventionalLeaf(path: string): string {
 }
 
 function isWithinRoots(path: string, roots: string[]): boolean {
-  if (roots.length === 0) return true;
-  return roots.some((root) => root === "." || path === root || path.startsWith(`${root}/`));
+  if (roots.length === 0) return false;
+  return roots.some((root) => path === root || path.startsWith(`${root}/`));
 }
 
-function resolveWatchTargets(cwd: string, roots: string[]): string[] {
-  const normalizedRoots = normalizeArtifactRoots(cwd, roots);
-  if (normalizedRoots.length === 0) return [resolve(cwd)];
+export interface ArtifactWatchTarget {
+  path: string;
+  eventBase: string;
+  recursive: boolean;
+}
+
+export function resolveArtifactWatchTargets(
+  cwd: string,
+  roots: string[],
+  pathPolicy = new ArtifactPathPolicy(cwd),
+): ArtifactWatchTarget[] {
+  const normalizedRoots = normalizeArtifactRootsWithPolicy(cwd, roots, pathPolicy);
+  if (normalizedRoots.length === 0) return [];
   const projectReal = realpathSync(cwd);
-  const targets = normalizedRoots.map((root) => {
-    let candidate = resolve(cwd, root);
-    if (existsSync(candidate) && statSync(candidate).isFile()) candidate = dirname(candidate);
-    while (!existsSync(candidate) && candidate !== resolve(cwd)) candidate = dirname(candidate);
+  const targets = new Map<string, ArtifactWatchTarget>();
+  for (const root of normalizedRoots) {
+    const candidate = resolve(cwd, root);
+    if (!existsSync(candidate)) continue;
+    if (statSync(candidate).isFile()) {
+      const file = realpathSync(candidate);
+      targets.set(`file:${file}`, { path: file, eventBase: dirname(file), recursive: false });
+      continue;
+    }
     const resolvedTarget = realpathSync(candidate);
     const projectRelative = relative(projectReal, resolvedTarget);
-    return projectRelative === ".." || projectRelative.startsWith(`..${sep}`) || isAbsolute(projectRelative)
+    const directory = projectRelative === ".."
+      || projectRelative.startsWith(`..${sep}`)
+      || isAbsolute(projectRelative)
       ? projectReal
       : resolvedTarget;
-  });
-  return compactRoots(targets.map((target) => relative(projectReal, target).split(sep).join("/") || "."))
-    .map((target) => resolve(projectReal, target));
+    targets.set(`directory:${directory}`, { path: directory, eventBase: directory, recursive: true });
+  }
+  return [...targets.values()];
 }
 
-function isCandidate(relativePath: string): boolean {
+function isCandidate(relativePath: string, pathPolicy: ArtifactPathPolicy): boolean {
   const normalized = relativePath.split(/[\\/]+/);
-  if (normalized.some((part) => IGNORED_DIRECTORIES.has(part))) return false;
+  if (pathPolicy.isIgnored(relativePath, false)) return false;
   const name = normalized.at(-1)?.toLowerCase() ?? "";
   if (IGNORED_FILES.has(name) || name.startsWith("tsconfig.")) return false;
   return SUPPORTED_EXTENSIONS.has(extname(name).toLowerCase());

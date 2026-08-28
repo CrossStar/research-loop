@@ -2,6 +2,19 @@
 
 All notable changes to Research Loop are documented in this file.
 
+## Unreleased
+
+## 0.5.4 - 2026-08-28
+
+### Pi startup and artifact hygiene
+
+- Return from `session_start` immediately after restoring compact control state; run artifact rediscovery and Radar startup in a generation-guarded, abortable background task.
+- Prevent stale scans from a previous session from mutating the runtime after resume, switch, or shutdown.
+- Disable Artifact Radar when Experiment Mode has no explicit artifact roots instead of recursively watching the complete project.
+- Detect Python environments through `pyvenv.cfg`, project-local `VIRTUAL_ENV` and `CONDA_PREFIX`, plus a virtualenv-name fallback, and sanitize polluted roots during state restore and legacy migration.
+- Add gitignore-compatible `.research-loopignore` rules for project-specific artifact exclusions and apply one path policy to root normalization, watcher events, and rediscovery traversal.
+- Keep project-root artifact files as exact file roots instead of collapsing them to `.`.
+
 ## 0.5.3 - 2026-08-28
 
 ### Pi package installation

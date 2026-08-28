@@ -15,7 +15,25 @@ export const SUPPORTED_ARTIFACT_EXTENSIONS = new Set([
 ]);
 
 const TABLE_EXTENSIONS = new Set([".csv", ".parquet"]);
-const IGNORED_DIRECTORIES = new Set([".git", ".pi", ".claude", "node_modules", ".venv", "venv", "__pycache__"]);
+const HARD_IGNORED_DIRECTORIES = new Set([
+  ".git",
+  ".pi",
+  ".claude",
+  "node_modules",
+  "__pycache__",
+]);
+
+export function isHardIgnoredArtifactDirectory(name: string): boolean {
+  return HARD_IGNORED_DIRECTORIES.has(name.trim().toLowerCase());
+}
+
+export function isVirtualEnvironmentDirectoryName(name: string): boolean {
+  return /^\.?venv(?:[-_.].+)?$/.test(name.trim().toLowerCase());
+}
+
+export function isIgnoredArtifactDirectory(name: string): boolean {
+  return isHardIgnoredArtifactDirectory(name) || isVirtualEnvironmentDirectoryName(name);
+}
 
 /** Resolve file or tabular dataset metadata without any harness or preview dependency. */
 export async function resolveArtifactMetadata(
@@ -67,7 +85,7 @@ async function scanDatasetDirectory(
         break;
       }
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORIES.has(entry.name)) queue.push(resolve(directory, entry.name));
+        if (!isIgnoredArtifactDirectory(entry.name)) queue.push(resolve(directory, entry.name));
         continue;
       }
       if (!entry.isFile()) continue;

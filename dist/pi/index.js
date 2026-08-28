@@ -1,3 +1,487 @@
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __commonJS = (cb, mod) => function __require() {
+  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+
+// node_modules/ignore/index.js
+var require_ignore = __commonJS({
+  "node_modules/ignore/index.js"(exports, module) {
+    function makeArray(subject) {
+      return Array.isArray(subject) ? subject : [subject];
+    }
+    var UNDEFINED = void 0;
+    var EMPTY = "";
+    var SPACE = " ";
+    var ESCAPE = "\\";
+    var REGEX_TEST_BLANK_LINE = /^\s+$/;
+    var REGEX_INVALID_TRAILING_BACKSLASH = /(?:[^\\]|^)\\$/;
+    var REGEX_REPLACE_LEADING_EXCAPED_EXCLAMATION = /^\\!/;
+    var REGEX_REPLACE_LEADING_EXCAPED_HASH = /^\\#/;
+    var REGEX_SPLITALL_CRLF = /\r?\n/g;
+    var REGEX_TEST_INVALID_PATH = /^\.{0,2}\/|^\.{1,2}$/;
+    var REGEX_TEST_TRAILING_SLASH = /\/$/;
+    var SLASH = "/";
+    var TMP_KEY_IGNORE = "node-ignore";
+    if (typeof Symbol !== "undefined") {
+      TMP_KEY_IGNORE = Symbol.for("node-ignore");
+    }
+    var KEY_IGNORE = TMP_KEY_IGNORE;
+    var define = (object, key, value) => {
+      Object.defineProperty(object, key, { value });
+      return value;
+    };
+    var REGEX_REGEXP_RANGE = /([0-z])-([0-z])/g;
+    var RETURN_FALSE = () => false;
+    var sanitizeRange = (range) => range.replace(
+      REGEX_REGEXP_RANGE,
+      (match, from, to) => from.charCodeAt(0) <= to.charCodeAt(0) ? match : EMPTY
+    );
+    var negateRange = (range) => range.startsWith("!") || range.startsWith("\\^") ? `^${range.slice(range[0] === "!" ? 1 : 2)}` : range;
+    var cleanRangeBackSlash = (slashes) => {
+      const { length } = slashes;
+      return slashes.slice(0, length - length % 2);
+    };
+    var REPLACERS = [
+      [
+        // Remove BOM
+        // TODO:
+        // Other similar zero-width characters?
+        /^\uFEFF/,
+        () => EMPTY
+      ],
+      // > Trailing spaces are ignored unless they are quoted with backslash ("\")
+      [
+        // (a\ ) -> (a )
+        // (a  ) -> (a)
+        // (a ) -> (a)
+        // (a \ ) -> (a  )
+        /((?:\\\\)*?)(\\?\s+)$/,
+        (_2, m1, m2) => m1 + (m2.indexOf("\\") === 0 ? SPACE : EMPTY)
+      ],
+      // Replace (\ ) with ' '
+      // (\ ) -> ' '
+      // (\\ ) -> '\\ '
+      // (\\\ ) -> '\\ '
+      [
+        /(\\+?)\s/g,
+        (_2, m1) => {
+          const { length } = m1;
+          return m1.slice(0, length - length % 2) + SPACE;
+        }
+      ],
+      // Escape metacharacters
+      // which is written down by users but means special for regular expressions.
+      // > There are 12 characters with special meanings:
+      // > - the backslash \,
+      // > - the caret ^,
+      // > - the dollar sign $,
+      // > - the period or dot .,
+      // > - the vertical bar or pipe symbol |,
+      // > - the question mark ?,
+      // > - the asterisk or star *,
+      // > - the plus sign +,
+      // > - the opening parenthesis (,
+      // > - the closing parenthesis ),
+      // > - and the opening square bracket [,
+      // > - the opening curly brace {,
+      // > These special characters are often called "metacharacters".
+      [
+        /[\\$.|*+(){^]/g,
+        (match) => `\\${match}`
+      ],
+      [
+        // > a question mark (?) matches a single character
+        /(?!\\)\?/g,
+        () => "[^/]"
+      ],
+      // leading slash
+      [
+        // > A leading slash matches the beginning of the pathname.
+        // > For example, "/*.c" matches "cat-file.c" but not "mozilla-sha1/sha1.c".
+        // A leading slash matches the beginning of the pathname
+        /^\//,
+        () => "^"
+      ],
+      // replace special metacharacter slash after the leading slash
+      [
+        /\//g,
+        () => "\\/"
+      ],
+      [
+        // > A leading "**" followed by a slash means match in all directories.
+        // > For example, "**/foo" matches file or directory "foo" anywhere,
+        // > the same as pattern "foo".
+        // > "**/foo/bar" matches file or directory "bar" anywhere that is directly
+        // >   under directory "foo".
+        // Notice that the '*'s have been replaced as '\\*'
+        /^\^*(?:\\\*\\\*\\\/)+/,
+        // '**/foo' <-> 'foo'
+        () => "^(?:.*\\/)?"
+      ],
+      // starting
+      [
+        // there will be no leading '/'
+        //   (which has been replaced by section "leading slash")
+        // If starts with '**', adding a '^' to the regular expression also works
+        /^(?=[^^])/,
+        function startingReplacer() {
+          return !/\/(?!$)/.test(this) ? "(?:^|\\/)" : "^";
+        }
+      ],
+      // two globstars
+      [
+        // Use lookahead assertions so that we could match more than one `'/**'`
+        /\\\/\\\*\\\*(?=\\\/|$)/g,
+        // Zero, one or several directories
+        // should not use '*', or it will be replaced by the next replacer
+        // Check if it is not the last `'/**'`
+        (_2, index, str) => index + 6 < str.length ? "(?:\\/[^\\/]+)*" : "\\/.+"
+      ],
+      // normal intermediate wildcards
+      [
+        // Never replace escaped '*'
+        // ignore rule '\*' will match the path '*'
+        // 'abc.*/' -> go
+        // 'abc.*'  -> skip this rule,
+        //    coz trailing single wildcard will be handed by [trailing wildcard]
+        /(^|[^\\]+)(\\\*)+(?=.+)/g,
+        // '*.js' matches '.js'
+        // '*.js' doesn't match 'abc'
+        (_2, p1, p2) => {
+          const unescaped = p2.replace(/\\\*/g, "[^\\/]*");
+          return p1 + unescaped;
+        }
+      ],
+      [
+        // unescape, revert step 3 except for back slash
+        // For example, if a user escape a '\\*',
+        // after step 3, the result will be '\\\\\\*'
+        /\\\\\\(?=[$.|*+(){^])/g,
+        () => ESCAPE
+      ],
+      [
+        // '\\\\' -> '\\'
+        /\\\\/g,
+        () => ESCAPE
+      ],
+      [
+        // > The range notation, e.g. [a-zA-Z],
+        // > can be used to match one of the characters in a range.
+        // `\` is escaped by step 3
+        /(\\)?\[([^\]/]*?)(\\*)($|\])/g,
+        (match, leadEscape, range, endEscape, close) => leadEscape === ESCAPE ? `\\[${range}${cleanRangeBackSlash(endEscape)}${close}` : close === "]" ? endEscape.length % 2 === 0 ? `[${negateRange(sanitizeRange(range))}${endEscape}]` : "[]" : "[]"
+      ],
+      // ending
+      [
+        // 'js' will not match 'js.'
+        // 'ab' will not match 'abc'
+        /(?:[^*])$/,
+        // WTF!
+        // https://git-scm.com/docs/gitignore
+        // changes in [2.22.1](https://git-scm.com/docs/gitignore/2.22.1)
+        // which re-fixes #24, #38
+        // > If there is a separator at the end of the pattern then the pattern
+        // > will only match directories, otherwise the pattern can match both
+        // > files and directories.
+        // 'js*' will not match 'a.js'
+        // 'js/' will not match 'a.js'
+        // 'js' will match 'a.js' and 'a.js/'
+        (match) => /\/$/.test(match) ? `${match}$` : `${match}(?=$|\\/$)`
+      ]
+    ];
+    var REGEX_REPLACE_TRAILING_WILDCARD = /(^|\\\/)?\\\*$/;
+    var MODE_IGNORE = "regex";
+    var MODE_CHECK_IGNORE = "checkRegex";
+    var UNDERSCORE = "_";
+    var TRAILING_WILD_CARD_REPLACERS = {
+      [MODE_IGNORE](_2, p1) {
+        const prefix = p1 ? `${p1}[^/]+` : "[^/]*";
+        return `${prefix}(?=$|\\/$)`;
+      },
+      [MODE_CHECK_IGNORE](_2, p1) {
+        const prefix = p1 ? `${p1}[^/]*` : "[^/]*";
+        return `${prefix}(?=$|\\/$)`;
+      }
+    };
+    var makeRegexPrefix = (pattern) => REPLACERS.reduce(
+      (prev, [matcher, replacer]) => prev.replace(matcher, replacer.bind(pattern)),
+      pattern
+    );
+    var isString = (subject) => typeof subject === "string";
+    var checkPattern = (pattern) => pattern && isString(pattern) && !REGEX_TEST_BLANK_LINE.test(pattern) && !REGEX_INVALID_TRAILING_BACKSLASH.test(pattern) && pattern.indexOf("#") !== 0;
+    var splitPattern = (pattern) => pattern.split(REGEX_SPLITALL_CRLF).filter(Boolean);
+    var IgnoreRule = class {
+      constructor(pattern, mark, body, ignoreCase, negative, prefix) {
+        this.pattern = pattern;
+        this.mark = mark;
+        this.negative = negative;
+        define(this, "body", body);
+        define(this, "ignoreCase", ignoreCase);
+        define(this, "regexPrefix", prefix);
+      }
+      get regex() {
+        const key = UNDERSCORE + MODE_IGNORE;
+        if (this[key]) {
+          return this[key];
+        }
+        return this._make(MODE_IGNORE, key);
+      }
+      get checkRegex() {
+        const key = UNDERSCORE + MODE_CHECK_IGNORE;
+        if (this[key]) {
+          return this[key];
+        }
+        return this._make(MODE_CHECK_IGNORE, key);
+      }
+      _make(mode, key) {
+        const str = this.regexPrefix.replace(
+          REGEX_REPLACE_TRAILING_WILDCARD,
+          // It does not need to bind pattern
+          TRAILING_WILD_CARD_REPLACERS[mode]
+        );
+        const regex = this.ignoreCase ? new RegExp(str, "i") : new RegExp(str);
+        return define(this, key, regex);
+      }
+    };
+    var createRule = ({
+      pattern,
+      mark
+    }, ignoreCase) => {
+      let negative = false;
+      let body = pattern;
+      if (body.indexOf("!") === 0) {
+        negative = true;
+        body = body.substr(1);
+      }
+      body = body.replace(REGEX_REPLACE_LEADING_EXCAPED_EXCLAMATION, "!").replace(REGEX_REPLACE_LEADING_EXCAPED_HASH, "#");
+      const regexPrefix = makeRegexPrefix(body);
+      return new IgnoreRule(
+        pattern,
+        mark,
+        body,
+        ignoreCase,
+        negative,
+        regexPrefix
+      );
+    };
+    var RuleManager = class {
+      constructor(ignoreCase) {
+        this._ignoreCase = ignoreCase;
+        this._rules = [];
+      }
+      _add(pattern) {
+        if (pattern && pattern[KEY_IGNORE]) {
+          this._rules = this._rules.concat(pattern._rules._rules);
+          this._added = true;
+          return;
+        }
+        if (isString(pattern)) {
+          pattern = {
+            pattern
+          };
+        }
+        if (checkPattern(pattern.pattern)) {
+          const rule = createRule(pattern, this._ignoreCase);
+          this._added = true;
+          this._rules.push(rule);
+        }
+      }
+      // @param {Array<string> | string | Ignore} pattern
+      add(pattern) {
+        this._added = false;
+        makeArray(
+          isString(pattern) ? splitPattern(pattern) : pattern
+        ).forEach(this._add, this);
+        return this._added;
+      }
+      // Test one single path without recursively checking parent directories
+      //
+      // - checkUnignored `boolean` whether should check if the path is unignored,
+      //   setting `checkUnignored` to `false` could reduce additional
+      //   path matching.
+      // - check `string` either `MODE_IGNORE` or `MODE_CHECK_IGNORE`
+      // @returns {TestResult} true if a file is ignored
+      test(path, checkUnignored, mode) {
+        let ignored = false;
+        let unignored = false;
+        let matchedRule;
+        this._rules.forEach((rule) => {
+          const { negative } = rule;
+          if (unignored === negative && ignored !== unignored || negative && !ignored && !unignored && !checkUnignored) {
+            return;
+          }
+          const matched = rule[mode].test(path);
+          if (!matched) {
+            return;
+          }
+          ignored = !negative;
+          unignored = negative;
+          matchedRule = negative ? UNDEFINED : rule;
+        });
+        const ret = {
+          ignored,
+          unignored
+        };
+        if (matchedRule) {
+          ret.rule = matchedRule;
+        }
+        return ret;
+      }
+    };
+    var throwError = (message, Ctor) => {
+      throw new Ctor(message);
+    };
+    var checkPath = (path, originalPath, doThrow) => {
+      if (!isString(path)) {
+        return doThrow(
+          `path must be a string, but got \`${originalPath}\``,
+          TypeError
+        );
+      }
+      if (!path) {
+        return doThrow(`path must not be empty`, TypeError);
+      }
+      if (checkPath.isNotRelative(path)) {
+        const r = "`path.relative()`d";
+        return doThrow(
+          `path should be a ${r} string, but got "${originalPath}"`,
+          RangeError
+        );
+      }
+      return true;
+    };
+    var isNotRelative = (path) => REGEX_TEST_INVALID_PATH.test(path);
+    checkPath.isNotRelative = isNotRelative;
+    checkPath.convert = (p) => p;
+    var Ignore = class {
+      constructor({
+        ignorecase = true,
+        ignoreCase = ignorecase,
+        allowRelativePaths = false
+      } = {}) {
+        define(this, KEY_IGNORE, true);
+        this._rules = new RuleManager(ignoreCase);
+        this._strictPathCheck = !allowRelativePaths;
+        this._initCache();
+      }
+      _initCache() {
+        this._ignoreCache = /* @__PURE__ */ Object.create(null);
+        this._testCache = /* @__PURE__ */ Object.create(null);
+      }
+      add(pattern) {
+        if (this._rules.add(pattern)) {
+          this._initCache();
+        }
+        return this;
+      }
+      // legacy
+      addPattern(pattern) {
+        return this.add(pattern);
+      }
+      // @returns {TestResult}
+      _test(originalPath, cache, checkUnignored, slices) {
+        const path = originalPath && checkPath.convert(originalPath);
+        checkPath(
+          path,
+          originalPath,
+          this._strictPathCheck ? throwError : RETURN_FALSE
+        );
+        return this._t(path, cache, checkUnignored, slices);
+      }
+      checkIgnore(path) {
+        if (!REGEX_TEST_TRAILING_SLASH.test(path)) {
+          return this.test(path);
+        }
+        const slices = path.split(SLASH).filter(Boolean);
+        slices.pop();
+        if (slices.length) {
+          const parent = this._t(
+            slices.join(SLASH) + SLASH,
+            this._testCache,
+            true,
+            slices
+          );
+          if (parent.ignored) {
+            return parent;
+          }
+        }
+        return this._rules.test(path, false, MODE_CHECK_IGNORE);
+      }
+      _t(path, cache, checkUnignored, slices) {
+        if (path in cache) {
+          return cache[path];
+        }
+        if (!slices) {
+          slices = path.split(SLASH).filter(Boolean);
+        }
+        slices.pop();
+        if (!slices.length) {
+          return cache[path] = this._rules.test(path, checkUnignored, MODE_IGNORE);
+        }
+        const parent = this._t(
+          slices.join(SLASH) + SLASH,
+          cache,
+          checkUnignored,
+          slices
+        );
+        return cache[path] = parent.ignored ? parent : this._rules.test(path, checkUnignored, MODE_IGNORE);
+      }
+      ignores(path) {
+        return this._test(path, this._ignoreCache, false).ignored;
+      }
+      createFilter() {
+        return (path) => !this.ignores(path);
+      }
+      filter(paths) {
+        return makeArray(paths).filter(this.createFilter());
+      }
+      // @returns {TestResult}
+      test(path) {
+        return this._test(path, this._testCache, true);
+      }
+    };
+    var factory = (options) => new Ignore(options);
+    var isPathValid = (path) => checkPath(path && checkPath.convert(path), path, RETURN_FALSE);
+    var setupWindows = () => {
+      const makePosix = (str) => /^\\\\\?\\/.test(str) || /["<>|\u0000-\u001F]+/u.test(str) ? str : str.replace(/\\/g, "/");
+      checkPath.convert = makePosix;
+      const REGEX_TEST_WINDOWS_PATH_ABSOLUTE = /^[a-z]:\//i;
+      checkPath.isNotRelative = (path) => REGEX_TEST_WINDOWS_PATH_ABSOLUTE.test(path) || isNotRelative(path);
+    };
+    if (
+      // Detect `process` so that it can run in browsers.
+      typeof process !== "undefined" && process.platform === "win32"
+    ) {
+      setupWindows();
+    }
+    module.exports = factory;
+    factory.default = factory;
+    module.exports.isPathValid = isPathValid;
+    define(module.exports, Symbol.for("setupWindows"), setupWindows);
+  }
+});
+
 // src/index.ts
 import { StringEnum as StringEnum2 } from "@earendil-works/pi-ai";
 import { Container as Container2, Key, matchesKey, Text as Text2 } from "@earendil-works/pi-tui";
@@ -18,7 +502,22 @@ var SUPPORTED_ARTIFACT_EXTENSIONS = /* @__PURE__ */ new Set([
   ".parquet"
 ]);
 var TABLE_EXTENSIONS = /* @__PURE__ */ new Set([".csv", ".parquet"]);
-var IGNORED_DIRECTORIES = /* @__PURE__ */ new Set([".git", ".pi", ".claude", "node_modules", ".venv", "venv", "__pycache__"]);
+var HARD_IGNORED_DIRECTORIES = /* @__PURE__ */ new Set([
+  ".git",
+  ".pi",
+  ".claude",
+  "node_modules",
+  "__pycache__"
+]);
+function isHardIgnoredArtifactDirectory(name) {
+  return HARD_IGNORED_DIRECTORIES.has(name.trim().toLowerCase());
+}
+function isVirtualEnvironmentDirectoryName(name) {
+  return /^\.?venv(?:[-_.].+)?$/.test(name.trim().toLowerCase());
+}
+function isIgnoredArtifactDirectory(name) {
+  return isHardIgnoredArtifactDirectory(name) || isVirtualEnvironmentDirectoryName(name);
+}
 async function resolveArtifactMetadata(cwd, inputPath) {
   const cleanPath = inputPath.startsWith("@") ? inputPath.slice(1) : inputPath;
   const absolutePath = resolve(cwd, cleanPath);
@@ -57,7 +556,7 @@ async function scanDatasetDirectory(cwd, absoluteDirectory, directoryMtimeMs) {
         break;
       }
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORIES.has(entry.name)) queue.push(resolve(directory, entry.name));
+        if (!isIgnoredArtifactDirectory(entry.name)) queue.push(resolve(directory, entry.name));
         continue;
       }
       if (!entry.isFile()) continue;
@@ -92,7 +591,8 @@ function normalizePath(path) {
 }
 
 // src/artifacts.ts
-import { createReadStream, existsSync, realpathSync, statSync, watch } from "node:fs";
+var import_ignore = __toESM(require_ignore(), 1);
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync, watch } from "node:fs";
 import { open, opendir as opendir2, readFile, realpath, stat as stat2 } from "node:fs/promises";
 import { basename as basename2, dirname, extname as extname2, isAbsolute, relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
 import { createInterface } from "node:readline";
@@ -125,7 +625,7 @@ var IMAGE_MIME = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg"
 };
-var IGNORED_DIRECTORIES2 = /* @__PURE__ */ new Set([".git", ".pi", ".claude", "node_modules", ".venv", "venv", "__pycache__"]);
+var RESEARCH_LOOP_IGNORE_FILE = ".research-loopignore";
 var CONVENTIONAL_ARTIFACT_SUBDIRECTORIES = /* @__PURE__ */ new Set([
   "figures",
   "plots",
@@ -143,14 +643,68 @@ var IGNORED_FILES = /* @__PURE__ */ new Set([
   "composer.json",
   "settings.json"
 ]);
+var ArtifactPathPolicy = class {
+  project;
+  ignoredEnvironmentRoots;
+  checkedEnvironmentMarkers = /* @__PURE__ */ new Map();
+  ignoreRules;
+  constructor(cwd) {
+    this.project = resolve2(cwd);
+    this.ignoredEnvironmentRoots = [process.env.VIRTUAL_ENV, process.env.CONDA_PREFIX].filter((value) => Boolean(value?.trim())).map((value) => this.projectRelative(value)).filter((value) => Boolean(value));
+    try {
+      const rules = readFileSync(resolve2(this.project, RESEARCH_LOOP_IGNORE_FILE), "utf8");
+      this.ignoreRules = (0, import_ignore.default)().add(rules);
+    } catch {
+      this.ignoreRules = void 0;
+    }
+  }
+  isIgnored(relativePath, directory = false) {
+    const normalized = toPosixRelative(relativePath);
+    if (!normalized) return false;
+    if (normalized === ".." || normalized.startsWith("../")) return true;
+    const parts = normalized.split("/");
+    if (parts.some(isHardIgnoredArtifactDirectory)) return true;
+    if (this.ignoredEnvironmentRoots.some((root) => normalized === root || normalized.startsWith(`${root}/`))) {
+      return true;
+    }
+    if (this.isInsideMarkedPythonEnvironment(parts, directory)) return true;
+    if (parts.some(isVirtualEnvironmentDirectoryName)) return true;
+    return this.ignoreRules?.ignores(directory ? `${normalized}/` : normalized) ?? false;
+  }
+  isInsideMarkedPythonEnvironment(parts, directory) {
+    const limit = directory ? parts.length : Math.max(0, parts.length - 1);
+    for (let length = 1; length <= limit; length += 1) {
+      const candidate = parts.slice(0, length).join("/");
+      let ignored = this.checkedEnvironmentMarkers.get(candidate);
+      if (ignored === void 0) {
+        const absolute = resolve2(this.project, candidate);
+        ignored = existsSync(resolve2(absolute, "pyvenv.cfg"));
+        if (ignored || existsSync(absolute)) this.checkedEnvironmentMarkers.set(candidate, ignored);
+      }
+      if (ignored) return true;
+    }
+    return false;
+  }
+  projectRelative(input) {
+    const absolute = resolve2(this.project, input.trim());
+    const candidate = relative2(this.project, absolute);
+    if (!candidate || candidate === ".." || candidate.startsWith(`..${sep2}`) || isAbsolute(candidate)) {
+      return void 0;
+    }
+    return candidate.split(sep2).join("/");
+  }
+};
 var ArtifactRadar = class {
   constructor(cwd, initialRecords, onArtifact, artifactRoots = []) {
     this.cwd = cwd;
     this.onArtifact = onArtifact;
     this.artifactRoots = artifactRoots;
     this.records = [...initialRecords];
+    this.pathPolicy = new ArtifactPathPolicy(cwd);
   }
   watchers = [];
+  watcherSignature = "";
+  rootRefreshTimer;
   stopped = true;
   captureDepth = 0;
   records;
@@ -158,19 +712,24 @@ var ArtifactRadar = class {
   pendingDatasetEmits = /* @__PURE__ */ new Map();
   pendingNewDatasets = /* @__PURE__ */ new Set();
   datasetMembers = /* @__PURE__ */ new Map();
+  pathPolicy;
   start() {
-    if (this.watchers.length > 0) return;
+    if (!this.stopped) return;
     this.stopped = false;
     try {
-      for (const target of resolveWatchTargets(this.cwd, this.artifactRoots)) {
-        const watcher = watch(target, { recursive: true }, (_event, filename) => {
-          if (this.captureDepth === 0 || !filename) return;
-          const relativePath = relative2(this.cwd, resolve2(target, filename.toString())).split(sep2).join("/");
-          if (!isWithinRoots(relativePath, this.artifactRoots) || !isCandidate(relativePath)) return;
-          this.queue(relativePath);
-        });
-        watcher.on("error", () => this.stop());
-        this.watchers.push(watcher);
+      const hasMissingRoots = this.refreshWatchers();
+      if (hasMissingRoots) {
+        this.rootRefreshTimer = setInterval(() => {
+          try {
+            if (!this.refreshWatchers() && this.rootRefreshTimer) {
+              clearInterval(this.rootRefreshTimer);
+              this.rootRefreshTimer = void 0;
+            }
+          } catch {
+            this.stop();
+          }
+        }, 250);
+        this.rootRefreshTimer.unref();
       }
     } catch (error) {
       this.stop();
@@ -179,12 +738,35 @@ var ArtifactRadar = class {
   }
   stop() {
     this.stopped = true;
+    if (this.rootRefreshTimer) clearInterval(this.rootRefreshTimer);
+    this.rootRefreshTimer = void 0;
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
+    this.watcherSignature = "";
     for (const timer of [...this.pending.values(), ...this.pendingDatasetEmits.values()]) clearTimeout(timer);
     this.pending.clear();
     this.pendingDatasetEmits.clear();
     this.pendingNewDatasets.clear();
+  }
+  refreshWatchers() {
+    if (this.stopped) return false;
+    const targets = resolveArtifactWatchTargets(this.cwd, this.artifactRoots, this.pathPolicy);
+    const signature = JSON.stringify(targets);
+    if (signature === this.watcherSignature) return targets.length < this.artifactRoots.length;
+    for (const watcher of this.watchers) watcher.close();
+    this.watchers = [];
+    this.watcherSignature = signature;
+    for (const target of targets) {
+      const watcher = watch(target.path, { recursive: target.recursive }, (_event, filename) => {
+        if (this.captureDepth === 0 || !filename) return;
+        const relativePath = relative2(this.cwd, resolve2(target.eventBase, filename.toString())).split(sep2).join("/");
+        if (!isWithinRoots(relativePath, this.artifactRoots) || !isCandidate(relativePath, this.pathPolicy)) return;
+        this.queue(relativePath);
+      });
+      watcher.on("error", () => this.stop());
+      this.watchers.push(watcher);
+    }
+    return targets.length < this.artifactRoots.length;
   }
   beginCapture() {
     this.captureDepth += 1;
@@ -282,7 +864,14 @@ var ArtifactRadar = class {
 async function resolveArtifactRecord(cwd, inputPath) {
   return resolveArtifactMetadata(cwd, inputPath);
 }
+function createArtifactRootNormalizer(cwd) {
+  const pathPolicy = new ArtifactPathPolicy(cwd);
+  return (inputs) => normalizeArtifactRootsWithPolicy(cwd, inputs, pathPolicy);
+}
 function normalizeArtifactRoots(cwd, inputs) {
+  return createArtifactRootNormalizer(cwd)(inputs);
+}
+function normalizeArtifactRootsWithPolicy(cwd, inputs, pathPolicy) {
   const project = resolve2(cwd);
   const projectReal = realpathSync(project);
   const normalized = [];
@@ -290,29 +879,44 @@ function normalizeArtifactRoots(cwd, inputs) {
     if (typeof input !== "string" || !input.trim()) continue;
     const absolute = resolve2(project, input.trim());
     const projectRelative = relative2(project, absolute);
-    if (projectRelative === ".." || projectRelative.startsWith(`..${sep2}`) || isAbsolute(projectRelative)) continue;
-    if (existsSync(absolute)) {
-      const resolvedTarget = realpathSync(absolute);
-      const realRelative = relative2(projectReal, resolvedTarget);
-      if (realRelative === ".." || realRelative.startsWith(`..${sep2}`) || isAbsolute(realRelative)) continue;
+    if (!projectRelative || projectRelative === "." || projectRelative === ".." || projectRelative.startsWith(`..${sep2}`) || isAbsolute(projectRelative)) continue;
+    const exists = existsSync(absolute);
+    let directory = true;
+    try {
+      if (exists) directory = statSync(absolute).isDirectory();
+    } catch {
+      continue;
     }
-    normalized.push((projectRelative || ".").split(sep2).join("/"));
+    if (pathPolicy.isIgnored(projectRelative, directory)) continue;
+    if (exists) {
+      try {
+        const resolvedTarget = realpathSync(absolute);
+        const realRelative = relative2(projectReal, resolvedTarget);
+        if (realRelative === ".." || realRelative.startsWith(`..${sep2}`) || isAbsolute(realRelative)) continue;
+      } catch {
+        continue;
+      }
+    }
+    normalized.push(projectRelative.split(sep2).join("/"));
   }
   return compactRoots(normalized);
 }
 function inferArtifactRoot(record) {
   if (record.kind === "dataset") return stripConventionalLeaf(record.path);
   const directory = dirname(record.path).split(sep2).join("/");
-  return directory === "." ? "." : stripConventionalLeaf(directory);
+  return directory === "." ? record.path : stripConventionalLeaf(directory);
 }
-async function discoverArtifactsFromRoots(cwd, inputs) {
-  const roots = normalizeArtifactRoots(cwd, inputs);
+async function discoverArtifactsFromRoots(cwd, inputs, signal) {
+  signal?.throwIfAborted();
+  const pathPolicy = new ArtifactPathPolicy(cwd);
+  const roots = normalizeArtifactRootsWithPolicy(cwd, inputs, pathPolicy);
   const projectReal = await realpath(cwd);
   const files = /* @__PURE__ */ new Map();
   const datasets = /* @__PURE__ */ new Map();
   const inspectFile = async (absolutePath) => {
+    signal?.throwIfAborted();
     const normalizedPath = relative2(projectReal, absolutePath).split(sep2).join("/");
-    if (!isCandidate(normalizedPath)) return;
+    if (!isCandidate(normalizedPath, pathPolicy)) return;
     const fileStat = await stat2(absolutePath);
     if (!fileStat.isFile()) return;
     const extension = extname2(normalizedPath).toLowerCase();
@@ -339,6 +943,7 @@ async function discoverArtifactsFromRoots(cwd, inputs) {
     });
   };
   for (const root of roots) {
+    signal?.throwIfAborted();
     const absoluteRoot = resolve2(cwd, root);
     let rootStat;
     try {
@@ -353,17 +958,22 @@ async function discoverArtifactsFromRoots(cwd, inputs) {
       if (!rootStat.isDirectory()) continue;
       const queue = [resolvedRoot];
       while (queue.length > 0) {
+        signal?.throwIfAborted();
         const directory = queue.shift();
         if (!directory) break;
         const handle = await opendir2(directory);
         for await (const entry of handle) {
+          signal?.throwIfAborted();
           const absoluteEntry = resolve2(directory, entry.name);
           if (entry.isDirectory()) {
-            if (!IGNORED_DIRECTORIES2.has(entry.name)) queue.push(absoluteEntry);
+            const relativeEntry = relative2(projectReal, absoluteEntry).split(sep2).join("/");
+            if (!pathPolicy.isIgnored(relativeEntry, true)) queue.push(absoluteEntry);
           } else if (entry.isFile()) await inspectFile(absoluteEntry);
         }
       }
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) signal.throwIfAborted();
+      if (error instanceof Error && error.name === "AbortError") throw error;
       continue;
     }
   }
@@ -435,6 +1045,9 @@ function formatSize(bytes) {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
+function toPosixRelative(path) {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
+}
 function compactRoots(roots) {
   const ordered = [...new Set(roots)].sort((a, b2) => a.length - b2.length || a.localeCompare(b2));
   const compacted = [];
@@ -458,26 +1071,32 @@ function stripConventionalLeaf(path) {
   return normalized;
 }
 function isWithinRoots(path, roots) {
-  if (roots.length === 0) return true;
-  return roots.some((root) => root === "." || path === root || path.startsWith(`${root}/`));
+  if (roots.length === 0) return false;
+  return roots.some((root) => path === root || path.startsWith(`${root}/`));
 }
-function resolveWatchTargets(cwd, roots) {
-  const normalizedRoots = normalizeArtifactRoots(cwd, roots);
-  if (normalizedRoots.length === 0) return [resolve2(cwd)];
+function resolveArtifactWatchTargets(cwd, roots, pathPolicy = new ArtifactPathPolicy(cwd)) {
+  const normalizedRoots = normalizeArtifactRootsWithPolicy(cwd, roots, pathPolicy);
+  if (normalizedRoots.length === 0) return [];
   const projectReal = realpathSync(cwd);
-  const targets = normalizedRoots.map((root) => {
-    let candidate = resolve2(cwd, root);
-    if (existsSync(candidate) && statSync(candidate).isFile()) candidate = dirname(candidate);
-    while (!existsSync(candidate) && candidate !== resolve2(cwd)) candidate = dirname(candidate);
+  const targets = /* @__PURE__ */ new Map();
+  for (const root of normalizedRoots) {
+    const candidate = resolve2(cwd, root);
+    if (!existsSync(candidate)) continue;
+    if (statSync(candidate).isFile()) {
+      const file = realpathSync(candidate);
+      targets.set(`file:${file}`, { path: file, eventBase: dirname(file), recursive: false });
+      continue;
+    }
     const resolvedTarget = realpathSync(candidate);
     const projectRelative = relative2(projectReal, resolvedTarget);
-    return projectRelative === ".." || projectRelative.startsWith(`..${sep2}`) || isAbsolute(projectRelative) ? projectReal : resolvedTarget;
-  });
-  return compactRoots(targets.map((target) => relative2(projectReal, target).split(sep2).join("/") || ".")).map((target) => resolve2(projectReal, target));
+    const directory = projectRelative === ".." || projectRelative.startsWith(`..${sep2}`) || isAbsolute(projectRelative) ? projectReal : resolvedTarget;
+    targets.set(`directory:${directory}`, { path: directory, eventBase: directory, recursive: true });
+  }
+  return [...targets.values()];
 }
-function isCandidate(relativePath) {
+function isCandidate(relativePath, pathPolicy) {
   const normalized = relativePath.split(/[\\/]+/);
-  if (normalized.some((part) => IGNORED_DIRECTORIES2.has(part))) return false;
+  if (pathPolicy.isIgnored(relativePath, false)) return false;
   const name = normalized.at(-1)?.toLowerCase() ?? "";
   if (IGNORED_FILES.has(name) || name.startsWith("tsconfig.")) return false;
   return SUPPORTED_EXTENSIONS.has(extname2(name).toLowerCase());
@@ -616,7 +1235,7 @@ function truncate(value, limit) {
 // src/checkpoint.ts
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
+import { readFileSync as readFileSync2 } from "node:fs";
 import { realpath as realpath4, stat as stat5 } from "node:fs/promises";
 import { basename as basename4, extname as extname5, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
 import { Type } from "typebox";
@@ -3137,7 +3756,7 @@ function renderCheckpointResult(details, theme, expanded) {
   container.addChild(new Text(details.draft.shortConclusion, 0, 0));
   if (expanded) details.artifacts.filter((item) => item.role === "evidence" && checkpointImageMime(item.artifact.extension)).forEach((item) => {
     try {
-      const data = readFileSync(item.absolutePath).toString("base64");
+      const data = readFileSync2(item.absolutePath).toString("base64");
       container.addChild(new Text(`${theme.bold(item.title)}
 ${item.description}`, 0, 1));
       container.addChild(
@@ -3383,6 +4002,20 @@ var ResearchCore = class {
     if (index >= 0) this.state.artifacts[index] = { ...artifact };
     else this.state.artifacts.push({ ...artifact });
   }
+  setArtifactRoots(roots, currentExperimentRoots) {
+    const normalized = compactArtifactRoots(roots);
+    let changed = normalized.length !== this.state.artifactRoots.length || normalized.some((root, index) => root !== this.state.artifactRoots[index]);
+    if (changed) this.state.artifactRoots = normalized;
+    if (this.state.workMode === "experiment" && this.state.experiment && currentExperimentRoots) {
+      const current = compactArtifactRoots(currentExperimentRoots);
+      const experimentChanged = current.length !== (this.state.experiment.artifactRoots?.length ?? 0) || current.some((root, index) => root !== this.state.experiment.artifactRoots?.[index]);
+      if (experimentChanged) {
+        this.state.experiment.artifactRoots = current;
+        changed = true;
+      }
+    }
+    return changed;
+  }
   addArtifactRoots(roots) {
     const compacted = compactArtifactRoots([...this.state.artifactRoots, ...roots]);
     const stateChanged = compacted.length !== this.state.artifactRoots.length || compacted.some((root, index) => root !== this.state.artifactRoots[index]);
@@ -3620,7 +4253,7 @@ function compactArtifactRoots(roots) {
   const normalized = [...new Set(roots.filter((root) => typeof root === "string").map((root) => root.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "")).filter((root) => Boolean(root) && root !== ".." && !root.startsWith("../") && !root.startsWith("/") && !/^[A-Za-z]:\//.test(root)))].sort((a, b2) => a.length - b2.length || a.localeCompare(b2));
   const compacted = [];
   for (const root of normalized) {
-    if (compacted.some((parent) => parent === "." || root === parent || root.startsWith(`${parent}/`))) continue;
+    if (compacted.some((parent) => root === parent || root.startsWith(`${parent}/`))) continue;
     compacted.push(root);
   }
   return compacted;
@@ -3719,7 +4352,7 @@ var PI_EXPERIMENT_CODE_GUIDANCE = [
   "Use names that express research meaning. Comments should explain why a split, metric, layer, control, fixed variable, or protocol deviation exists; do not translate obvious code into comments.",
   "Separate model loading, data preparation, conditions, analysis, and plotting only when they are naturally distinct. Avoid factories, registries, strategy/context hierarchies, tiny wrapper chains, and reusable frameworks until multiple real experiments need them.",
   "Avoid broad defensive layers, retries, compatibility shims, silent recovery, repeated existence checks, and large try/except shells. Add only checks that prevent expensive wasted work or misleading results.",
-  "Save scientific artifacts once under a stable predictable run directory, declare known project-relative output directories in research_mode artifactRoots, and use names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
+  "Save scientific artifacts once under a stable predictable run directory and declare project-relative output directories in research_mode artifactRoots; Artifact Radar stays disabled when roots are omitted. Use names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
   "End the run with a compact Rich result table and a labeled list of exact saved paths so the researcher can judge the result and start the next iteration immediately."
 ].join("\n");
 function shouldAbortForCancelledQuestionnaire(toolName, details) {
@@ -3756,10 +4389,13 @@ var ResearchRuntime = class {
     this.blockedToolAttempts.clear();
     this.userDecisionPending = false;
     const latest = findLatestResearchState(ctx);
-    this.core.restoreState(latest ?? {});
+    const embeddedArtifacts = Boolean(latest && Object.hasOwn(latest, "artifacts"));
+    const legacyArtifacts = embeddedArtifacts && Array.isArray(latest?.artifacts) ? latest.artifacts : [];
+    const { artifacts: _artifacts, ...controlState } = latest ?? {};
+    this.core.restoreState(controlState);
     this.setToolAvailability();
     this.renderStatus(ctx);
-    return { embeddedArtifacts: Boolean(latest && Object.hasOwn(latest, "artifacts")) };
+    return { embeddedArtifacts, legacyArtifacts };
   }
   setEnabled(enabled, ctx) {
     this.blockedToolAttempts.clear();
@@ -3795,6 +4431,11 @@ var ResearchRuntime = class {
   upsertArtifact(artifact, ctx) {
     this.core.upsertArtifact(artifact);
     if (ctx) this.renderStatus(ctx);
+  }
+  setArtifactRoots(roots, currentExperimentRoots, persist = true) {
+    const changed = this.core.setArtifactRoots(roots, currentExperimentRoots);
+    if (changed && persist) this.persist();
+    return changed;
   }
   addArtifactRoots(roots, ctx, persist = true) {
     const changed = this.core.addArtifactRoots(roots);
@@ -3944,7 +4585,9 @@ function researchLoop(pi) {
   let activeContext;
   let viewerExposureWarned = false;
   let loadedArtifactRoots = /* @__PURE__ */ new Set();
-  let artifactLoadPromise;
+  let artifactLoadTask;
+  let artifactAbortController;
+  let sessionGeneration = 0;
   let radarRoots = "";
   let artifactRootsDirty = false;
   let artifactRootPersistTimer;
@@ -3962,21 +4605,29 @@ function researchLoop(pi) {
     }
     runtime.setArtifacts([...merged.values()], ctx);
   };
-  const ensureArtifactInventory = async (ctx, requestedRoots = runtime.artifactRoots) => {
-    if (artifactLoadPromise) await artifactLoadPromise;
+  const isCurrentSession = (ctx, generation, signal) => generation === sessionGeneration && activeContext === ctx && !signal.aborted;
+  const ensureArtifactInventory = async (ctx, requestedRoots = runtime.artifactRoots, generation = sessionGeneration, signal = artifactAbortController?.signal) => {
+    if (!signal || !isCurrentSession(ctx, generation, signal)) return;
+    if (artifactLoadTask?.generation === generation) await artifactLoadTask.promise;
+    if (!isCurrentSession(ctx, generation, signal)) return;
     const pendingRoots = requestedRoots.filter((root) => !loadedArtifactRoots.has(root));
     if (pendingRoots.length === 0) return;
-    artifactLoadPromise = (async () => {
-      const discovered = await discoverArtifactsFromRoots(ctx.cwd, pendingRoots);
+    const promise = (async () => {
+      const discovered = await discoverArtifactsFromRoots(ctx.cwd, pendingRoots, signal);
+      if (!isCurrentSession(ctx, generation, signal)) return;
       for (const root of pendingRoots) loadedArtifactRoots.add(root);
       mergeArtifacts(discovered, ctx);
     })();
+    const task = { generation, promise };
+    artifactLoadTask = task;
     try {
-      await artifactLoadPromise;
+      await promise;
     } catch (error) {
-      ctx.ui.notify(`Could not rediscover research artifacts: ${String(error)}`, "warning");
+      if (isCurrentSession(ctx, generation, signal)) {
+        ctx.ui.notify(`Could not rediscover research artifacts: ${String(error)}`, "warning");
+      }
     } finally {
-      artifactLoadPromise = void 0;
+      if (artifactLoadTask === task) artifactLoadTask = void 0;
     }
   };
   const flushArtifactRoots = () => {
@@ -3989,7 +4640,10 @@ function researchLoop(pi) {
   const scheduleArtifactRoots = () => {
     artifactRootsDirty = true;
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
-    artifactRootPersistTimer = setTimeout(flushArtifactRoots, 1e3);
+    const generation = sessionGeneration;
+    artifactRootPersistTimer = setTimeout(() => {
+      if (generation === sessionGeneration) flushArtifactRoots();
+    }, 1e3);
   };
   const markArtifactRootsPersisted = () => {
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
@@ -4002,33 +4656,48 @@ function researchLoop(pi) {
     radarRoots = "";
     flushArtifactRoots();
   };
-  const syncRadar = async (ctx) => {
+  const syncRadar = async (ctx, generation = sessionGeneration, signal = artifactAbortController?.signal) => {
+    if (!signal || !isCurrentSession(ctx, generation, signal)) return;
     if (!runtime.enabled || runtime.workMode !== "experiment") {
       stopRadar();
       return;
     }
-    const roots = runtime.currentArtifactRoots;
-    await ensureArtifactInventory(ctx, roots);
-    const signature = JSON.stringify(roots);
+    const normalizeRoots = createArtifactRootNormalizer(ctx.cwd);
+    const roots = normalizeRoots(runtime.currentArtifactRoots);
+    if (roots.length === 0) {
+      stopRadar();
+      return;
+    }
+    await ensureArtifactInventory(ctx, roots, generation, signal);
+    if (!isCurrentSession(ctx, generation, signal) || !runtime.enabled || runtime.workMode !== "experiment") return;
+    const currentRoots = normalizeRoots(runtime.currentArtifactRoots);
+    const signature = JSON.stringify(currentRoots);
+    if (signature !== JSON.stringify(roots)) {
+      await syncRadar(ctx, generation, signal);
+      return;
+    }
     if (radar && radarRoots === signature) return;
     stopRadar();
+    if (!isCurrentSession(ctx, generation, signal)) return;
     radar = new ArtifactRadar(ctx.cwd, runtime.artifacts, (artifact, isNew) => {
-      runtime.upsertArtifact(artifact, activeContext);
-      if (runtime.addArtifactRoots([inferArtifactRoot(artifact)], activeContext, false)) {
-        scheduleArtifactRoots();
-      }
+      if (!isCurrentSession(ctx, generation, signal)) return;
+      runtime.upsertArtifact(artifact, ctx);
+      const inferredRoot = normalizeRoots([inferArtifactRoot(artifact)]);
+      if (runtime.addArtifactRoots(inferredRoot, ctx, false)) scheduleArtifactRoots();
       const summary = artifact.kind === "dataset" ? `${artifact.fileCount ?? 0} ${artifact.extension.slice(1).toUpperCase()} files` : formatSize(artifact.size);
-      activeContext?.ui.notify(
+      ctx.ui.notify(
         `${isNew ? "Indexed" : "Updated"} ${artifact.kind}: ${artifact.path} (${summary})`,
         "info"
       );
-    }, roots);
+    }, currentRoots);
     radarRoots = signature;
     try {
       radar.start();
     } catch (error) {
       stopRadar();
-      ctx.ui.notify(`Artifact Radar unavailable: ${String(error)}`, "warning");
+      if (isCurrentSession(ctx, generation, signal)) {
+        ctx.ui.notify(`Artifact Radar unavailable: ${String(error)}`, "warning");
+      }
     }
   };
   const warnViewerExposure = (server, ctx) => {
@@ -4051,6 +4720,11 @@ function researchLoop(pi) {
     async save(draft, artifacts, ctx) {
       checkpointStore ??= new CheckpointStore(ctx.cwd);
       const stored = await checkpointStore.write(draft, artifacts);
+      const registeredRoots = normalizeArtifactRoots(
+        ctx.cwd,
+        artifacts.map((item) => inferArtifactRoot(item.artifact))
+      );
+      runtime.addArtifactRoots(registeredRoots, void 0, false);
       try {
         const server = await startCheckpointViewer(ctx);
         return { stored, viewerUrl: server.latestUrl };
@@ -4217,36 +4891,71 @@ Objective: ${params.objective}`;
     const active = payload.active;
     if (typeof active === "boolean") runtime.setUserDecisionPending(active, activeContext);
   });
-  pi.on("session_start", async (_event, ctx) => {
-    activeContext = ctx;
-    viewerExposureWarned = false;
-    loadedArtifactRoots = /* @__PURE__ */ new Set();
-    artifactLoadPromise = void 0;
+  pi.on("session_start", (_event, ctx) => {
+    artifactAbortController?.abort();
+    radar?.stop();
+    radar = void 0;
+    radarRoots = "";
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
     artifactRootPersistTimer = void 0;
     artifactRootsDirty = false;
+    const generation = ++sessionGeneration;
+    const controller = new AbortController();
+    artifactAbortController = controller;
+    activeContext = ctx;
+    viewerExposureWarned = false;
+    loadedArtifactRoots = /* @__PURE__ */ new Set();
+    artifactLoadTask = void 0;
     const restored = runtime.startSession(ctx);
-    if (restored.embeddedArtifacts) {
-      runtime.addArtifactRoots(runtime.artifacts.map(inferArtifactRoot), void 0, false);
-      for (const root of runtime.artifactRoots) loadedArtifactRoots.add(root);
-      runtime.persistControlState();
-      if (runtime.artifacts.length >= 100) {
-        ctx.ui.notify(
-          "Legacy artifact state was migrated to roots-only persistence. Existing JSONL history is unchanged; start a new session once to remove its previous startup cost.",
-          "warning"
-        );
-      }
-    }
+    const normalizeRoots = createArtifactRootNormalizer(ctx.cwd);
+    const sanitizedRoots = normalizeRoots(runtime.artifactRoots);
+    const sanitizedCurrentRoots = normalizeRoots(runtime.currentArtifactRoots);
+    const controlStateChanged = runtime.setArtifactRoots(sanitizedRoots, sanitizedCurrentRoots, false);
+    if (restored.embeddedArtifacts || controlStateChanged) runtime.persistControlState();
     checkpointStore = void 0;
     checkpointServer = void 0;
-    stopRadar();
-    await syncRadar(ctx);
+    setImmediate(() => {
+      void (async () => {
+        if (!isCurrentSession(ctx, generation, controller.signal)) return;
+        if (restored.embeddedArtifacts) {
+          const sanitizedArtifacts = [];
+          for (let index = 0; index < restored.legacyArtifacts.length; index += 1) {
+            if (index % 200 === 0) {
+              await new Promise((resolveYield) => setImmediate(resolveYield));
+              if (!isCurrentSession(ctx, generation, controller.signal)) return;
+            }
+            const artifact = restored.legacyArtifacts[index];
+            if (artifact && normalizeRoots([inferArtifactRoot(artifact)]).length > 0) {
+              sanitizedArtifacts.push(artifact);
+            }
+          }
+          if (!isCurrentSession(ctx, generation, controller.signal)) return;
+          runtime.setArtifacts(sanitizedArtifacts, ctx);
+          const migratedRoots = normalizeRoots(sanitizedArtifacts.map(inferArtifactRoot));
+          if (runtime.addArtifactRoots(migratedRoots, void 0, false)) runtime.persistControlState();
+          if (sanitizedArtifacts.length >= 100) {
+            ctx.ui.notify(
+              "Legacy artifact state was migrated to roots-only persistence. Existing JSONL history is unchanged; start a new session once to remove its previous startup cost.",
+              "warning"
+            );
+          }
+        }
+        await syncRadar(ctx, generation, controller.signal);
+      })().catch((error) => {
+        if (isCurrentSession(ctx, generation, controller.signal)) {
+          ctx.ui.notify(`Artifact background initialization failed: ${String(error)}`, "warning");
+        }
+      });
+    });
   });
   pi.on("session_shutdown", async (_event, ctx) => {
     runtime.clearStatus(ctx);
     stopRadar();
+    artifactAbortController?.abort();
+    artifactAbortController = void 0;
+    sessionGeneration += 1;
     loadedArtifactRoots.clear();
-    artifactLoadPromise = void 0;
+    artifactLoadTask = void 0;
     if (artifactRootPersistTimer) clearTimeout(artifactRootPersistTimer);
     artifactRootPersistTimer = void 0;
     artifactRootsDirty = false;

@@ -36,7 +36,7 @@ const PI_EXPERIMENT_CODE_GUIDANCE = [
   "Use names that express research meaning. Comments should explain why a split, metric, layer, control, fixed variable, or protocol deviation exists; do not translate obvious code into comments.",
   "Separate model loading, data preparation, conditions, analysis, and plotting only when they are naturally distinct. Avoid factories, registries, strategy/context hierarchies, tiny wrapper chains, and reusable frameworks until multiple real experiments need them.",
   "Avoid broad defensive layers, retries, compatibility shims, silent recovery, repeated existence checks, and large try/except shells. Add only checks that prevent expensive wasted work or misleading results.",
-  "Save scientific artifacts once under a stable predictable run directory, declare known project-relative output directories in research_mode artifactRoots, and use names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
+  "Save scientific artifacts once under a stable predictable run directory and declare project-relative output directories in research_mode artifactRoots; Artifact Radar stays disabled when roots are omitted. Use names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
   "End the run with a compact Rich result table and a labeled list of exact saved paths so the researcher can judge the result and start the next iteration immediately.",
 ].join("\n");
 
@@ -44,6 +44,7 @@ export type { ResearchState, ToolGateDecision } from "./core/types.js";
 
 export interface SessionRestoreResult {
   embeddedArtifacts: boolean;
+  legacyArtifacts: ArtifactRecord[];
 }
 
 export function shouldAbortForCancelledQuestionnaire(toolName: string, details: unknown): boolean {
@@ -88,10 +89,15 @@ export class ResearchRuntime {
     this.blockedToolAttempts.clear();
     this.userDecisionPending = false;
     const latest = findLatestResearchState(ctx);
-    this.core.restoreState(latest ?? {});
+    const embeddedArtifacts = Boolean(latest && Object.hasOwn(latest, "artifacts"));
+    const legacyArtifacts = embeddedArtifacts && Array.isArray(latest?.artifacts)
+      ? latest.artifacts as ArtifactRecord[]
+      : [];
+    const { artifacts: _artifacts, ...controlState } = latest ?? {};
+    this.core.restoreState(controlState);
     this.setToolAvailability();
     this.renderStatus(ctx);
-    return { embeddedArtifacts: Boolean(latest && Object.hasOwn(latest, "artifacts")) };
+    return { embeddedArtifacts, legacyArtifacts };
   }
 
   setEnabled(enabled: boolean, ctx: ExtensionContext): void {
@@ -137,6 +143,12 @@ export class ResearchRuntime {
   upsertArtifact(artifact: ArtifactRecord, ctx?: ExtensionContext): void {
     this.core.upsertArtifact(artifact);
     if (ctx) this.renderStatus(ctx);
+  }
+
+  setArtifactRoots(roots: string[], currentExperimentRoots: string[], persist = true): boolean {
+    const changed = this.core.setArtifactRoots(roots, currentExperimentRoots);
+    if (changed && persist) this.persist();
+    return changed;
   }
 
   addArtifactRoots(roots: string[], ctx?: ExtensionContext, persist = true): boolean {
