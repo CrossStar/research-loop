@@ -14,19 +14,48 @@ import {
 } from "./artifacts.js";
 import { registerResearchCheckpoint } from "./checkpoint.js";
 import { CheckpointViewerServer } from "./checkpoint-server.js";
-import { CheckpointStore } from "./checkpoint-store.js";
+import { CheckpointStore, type PropositionRevisionProposal } from "./checkpoint-store.js";
+import type { ExperimentContext } from "./core/types.js";
+import {
+  describePropositionForPolicy,
+  nextCheckpointSequence,
+  nextQuestionNumber,
+  PropositionStore,
+  questionPath,
+  type TreeQuestion,
+} from "./proposition-store.js";
 import {
   POLICY_MESSAGE,
   ResearchRuntime,
   shouldAbortForCancelledQuestionnaire,
 } from "./runtime.js";
+import { latexToUnicode } from "./latex-text.js";
 import { createTerminalImage } from "./terminal-image.js";
 
 const ASK_USER_BLOCKED_EVENT = "rpiv:ask-user:blocked";
 
+const PREDICTION = Type.Object({
+  observation: Type.String({ description: "If this is observed (concrete, ideally with a direction or threshold)" }),
+  implication: Type.String({ description: "then it means this for the question or proposition" }),
+});
+
+function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
+  return result.content.map((part) => part.type === "text" ? part.text ?? "" : "").join("\n");
+}
+
+interface CheckpointHandoff {
+  generation: number;
+  propositionId: string;
+  sequence: number;
+  newQuestionIds: string[];
+  revisionProposal?: PropositionRevisionProposal;
+}
+
 export default function researchLoop(pi: ExtensionAPI): void {
   const runtime = new ResearchRuntime(pi);
   let checkpointStore: CheckpointStore | undefined;
+  let propositionStore: PropositionStore | undefined;
+  let pendingHandoff: CheckpointHandoff | undefined;
   let checkpointServer: CheckpointViewerServer | undefined;
   let radar: ArtifactRadar | undefined;
   let activeContext: ExtensionContext | undefined;
@@ -174,6 +203,133 @@ export default function researchLoop(pi: ExtensionAPI): void {
       "warning",
     );
   };
+  const stores = (ctx: ExtensionContext) => {
+    checkpointStore ??= new CheckpointStore(ctx.cwd);
+    propositionStore ??= new PropositionStore(checkpointStore);
+    return { checkpoints: checkpointStore, propositions: propositionStore };
+  };
+  const refreshPropositionContext = async (ctx: ExtensionContext) => {
+    const propositionId = runtime.propositionId;
+    const tree = propositionId ? await stores(ctx).propositions.tree(propositionId) : undefined;
+    runtime.setPropositionContext(describePropositionForPolicy(tree, runtime.selectedNextQuestionId));
+  };
+  /** Resume the most recently updated proposition when the session has none, then refresh the policy context. */
+  const activateLatestProposition = async (ctx: ExtensionContext) => {
+    if (!runtime.propositionId) {
+      const latest = await stores(ctx).propositions.latest();
+      if (latest) {
+        runtime.setProposition(latest.id, ctx);
+        ctx.ui.notify(`Research proposition ${latest.id}: ${latexToUnicode(latest.statement)}`, "info");
+      }
+    }
+    await refreshPropositionContext(ctx);
+  };
+  const resolveExperiment = async (
+    params: {
+      title?: string;
+      questionId?: string;
+      rationale?: string;
+      predictions?: Array<{ observation: string; implication: string }>;
+      intent?: ExperimentContext["intent"];
+      plannedDataScope?: string;
+      reference?: string;
+      artifactRoots?: string[];
+    },
+    ctx: ExtensionContext,
+  ): Promise<ExperimentContext | string> => {
+    const missing = (["title", "questionId", "rationale", "intent", "plannedDataScope"] as const)
+      .filter((field) => !params[field]?.trim());
+    if ((params.predictions?.length ?? 0) < 2) missing.push("predictions (at least 2)" as never);
+    if (missing.length) return `Experiment Mode requires: ${missing.join(", ")}.`;
+    const propositionId = runtime.propositionId;
+    if (!propositionId) {
+      return "Experiment Mode requires an active proposition. Agree on it with the user and record it with research_proposition action=create first.";
+    }
+    const tree = await stores(ctx).propositions.tree(propositionId);
+    if (!tree) return `Active proposition ${propositionId} was not found under checkpoints/propositions.`;
+    const question = tree.questions.find((item) => item.id === params.questionId!.trim());
+    if (!question) {
+      const open = tree.questions.filter((item) => item.status === "open").map((item) => item.id);
+      return `${params.questionId} is not registered under ${propositionId}. Open questions: ${open.join(", ") || "none"}. Register a new question with research_proposition action=add_question first.`;
+    }
+    return {
+      title: params.title!,
+      propositionId,
+      questionId: question.id,
+      question: question.question,
+      rationale: params.rationale!,
+      predictions: params.predictions!,
+      intent: params.intent!,
+      plannedDataScope: params.plannedDataScope!,
+      reference: params.reference,
+      artifactRoots: normalizeArtifactRoots(ctx.cwd, params.artifactRoots ?? []),
+    };
+  };
+  const runHandoff = async (handoff: CheckpointHandoff, ctx: ExtensionContext) => {
+    const { propositions } = stores(ctx);
+    let revision = handoff.revisionProposal;
+    const chooseQuestion = async (statement: string, question: Pick<TreeQuestion, "id" | "question" | "proposed_experiment">) => {
+      runtime.selectNextQuestion(question.id, ctx);
+      await refreshPropositionContext(ctx);
+      const prefill = [
+        `继续验证命题 ${handoff.propositionId}：${statement}`,
+        `下一步问题 ${question.id}：${question.question}`,
+        question.proposed_experiment ? `建议实验：${question.proposed_experiment}` : undefined,
+        "请据此设计实验，登记事先预期后进入 Experiment Mode。",
+      ].filter((line): line is string => Boolean(line)).join("\n");
+      const message = await ctx.ui.editor("下一轮指令（可修改后提交；取消则只记录选择）", prefill);
+      if (message?.trim() && handoff.generation === sessionGeneration) pi.sendUserMessage(message.trim());
+    };
+
+    while (handoff.generation === sessionGeneration) {
+      const tree = await propositions.tree(handoff.propositionId);
+      if (!tree) return;
+      const raised = new Set(handoff.newQuestionIds);
+      const open = tree.questions.filter((item) => item.status === "open");
+      const ordered = [...open.filter((item) => raised.has(item.id)), ...open.filter((item) => !raised.has(item.id))];
+      const choices = new Map<string, () => Promise<boolean>>();
+      ordered.forEach((question) => {
+        choices.set(`${question.id}　${latexToUnicode(question.question)}${raised.has(question.id) ? "（本轮新问题）" : ""}`, async () => {
+          await chooseQuestion(tree.proposition.statement, question);
+          return true;
+        });
+      });
+      const proposed = revision;
+      if (proposed) {
+        choices.set(`采纳命题修订：${latexToUnicode(proposed.statement)}`, async () => {
+          const approved = await ctx.ui.confirm(
+            `修订命题 ${tree.proposition.id}？`,
+            latexToUnicode(`原命题：${tree.proposition.statement}\n修订为：${proposed.statement}\n理由：${proposed.reason}`),
+          );
+          if (approved) {
+            await propositions.revise(tree.proposition.id, proposed.statement, proposed.reason);
+            await refreshPropositionContext(ctx);
+            ctx.ui.notify(`命题 ${tree.proposition.id} 已修订。`, "info");
+          }
+          revision = undefined;
+          return false;
+        });
+      }
+      choices.set("提出新的问题…", async () => {
+        const text = await ctx.ui.input("新问题", "一句话描述下一步要验证的问题");
+        if (!text?.trim()) return false;
+        const question = await propositions.addQuestion(
+          tree.proposition.id,
+          text,
+          `用户在 C${handoff.sequence} 之后提出。`,
+          "user",
+        );
+        await chooseQuestion(tree.proposition.statement, question);
+        return true;
+      });
+      choices.set("暂不决定", async () => true);
+      const picked = await ctx.ui.select(
+        `C${handoff.sequence} 已完成 · 命题 ${tree.proposition.id}：下一步验证哪个问题？`,
+        [...choices.keys()],
+      );
+      if (!picked || await choices.get(picked)!()) return;
+    }
+  };
   const startCheckpointViewer = async (ctx: ExtensionContext) => {
     checkpointStore ??= new CheckpointStore(ctx.cwd);
     checkpointServer ??= new CheckpointViewerServer(checkpointStore);
@@ -184,9 +340,32 @@ export default function researchLoop(pi: ExtensionAPI): void {
 
   registerResearchCheckpoint(pi, {
     getArtifacts,
-    async save(draft, artifacts, ctx) {
-      checkpointStore ??= new CheckpointStore(ctx.cwd);
-      const stored = await checkpointStore.write(draft, artifacts);
+    async prepareChain(newQuestionCount, ctx) {
+      const experiment = runtime.experiment;
+      if (!experiment?.propositionId || !experiment.questionId || !experiment.predictions?.length) {
+        return "This experiment was started without a proposition question, so it cannot be linked into a checkpoint chain. Ask the user to end it with /research off and restart it under a proposition.";
+      }
+      const tree = await stores(ctx).propositions.tree(experiment.propositionId);
+      if (!tree) return `Proposition ${experiment.propositionId} was not found under checkpoints/propositions.`;
+      const question = tree.questions.find((item) => item.id === experiment.questionId);
+      if (!question) return `Question ${experiment.questionId} is no longer registered under ${experiment.propositionId}.`;
+      const raisedBy = tree.checkpoints.find((checkpoint) => checkpoint.id === question.raised_by);
+      const firstQuestion = nextQuestionNumber(tree);
+      return {
+        proposition: { id: tree.proposition.id, statement: tree.proposition.statement },
+        question: { id: question.id, question: question.question, origin: question.origin },
+        path: questionPath(tree, question.id).map((step) => ({
+          questionId: step.question.id,
+          via: step.via && { sequence: step.via.sequence, answer: step.via.answer },
+        })),
+        raisedBy: raisedBy && { sequence: raisedBy.sequence, title: raisedBy.title },
+        predictions: experiment.predictions,
+        sequence: nextCheckpointSequence(tree),
+        newQuestionIds: Array.from({ length: newQuestionCount }, (_, index) => `Q${firstQuestion + index}`),
+      };
+    },
+    async save(draft, artifacts, chain, ctx) {
+      const stored = await stores(ctx).checkpoints.write(draft, artifacts, chain);
       const registeredRoots = normalizeArtifactRoots(
         ctx.cwd,
         artifacts.map((item) => inferArtifactRoot(item.artifact)),
@@ -200,10 +379,21 @@ export default function researchLoop(pi: ExtensionAPI): void {
         return { stored };
       }
     },
-    onReached: (resultCount, ctx) => {
+    onReached: ({ stored, draft, resultCount }, ctx) => {
       runtime.reachCheckpoint(resultCount, ctx);
       markArtifactRootsPersisted();
       void syncRadar(ctx);
+      void refreshPropositionContext(ctx);
+      const { proposition_id: propositionId, sequence } = stored.metadata;
+      if (propositionId && sequence) {
+        pendingHandoff = {
+          generation: sessionGeneration,
+          propositionId,
+          sequence,
+          newQuestionIds: (stored.metadata.new_questions ?? []).map((item) => item.id),
+          revisionProposal: draft.revisionProposal,
+        };
+      }
     },
   });
 
@@ -211,12 +401,18 @@ export default function researchLoop(pi: ExtensionAPI): void {
     name: "research_mode",
     label: "Research Work Mode",
     description:
-      "Set the current Research Loop mode. Use Brainstorming to compare options, Exploration to read and understand code or materials, and Experiment before empirical execution. Disable Research Loop for ordinary implementation work. Call this alone, then proceed with the work.",
+      "Set the current Research Loop mode. Use Brainstorming to compare options, Exploration to read and understand code or materials, and Experiment before empirical execution. Experiment Mode answers one registered question of the active proposition and requires predictions registered before the run. Disable Research Loop for ordinary implementation work. Call this alone, then proceed with the work.",
     parameters: Type.Object({
       mode: StringEnum(["brainstorming", "exploration", "experiment"] as const),
       objective: Type.String({ description: "Current objective that justifies this mode" }),
       title: Type.Optional(Type.String({ description: "Experiment phase title; required for Experiment Mode" })),
-      question: Type.Optional(Type.String({ description: "Research Question; required for Experiment Mode" })),
+      questionId: Type.Optional(Type.String({ description: "Registered question of the active proposition, such as Q3; required for Experiment Mode" })),
+      rationale: Type.Optional(Type.String({ description: "Why this experiment can answer the question; required for Experiment Mode" })),
+      predictions: Type.Optional(Type.Array(PREDICTION, {
+        minItems: 2,
+        maxItems: 4,
+        description: "Outcomes predicted before the run, covering supporting and non-supporting results; copied verbatim into the checkpoint. Required for Experiment Mode",
+      })),
       intent: Type.Optional(
         StringEnum(["reproduction", "diagnostic", "exploratory", "ablation"] as const, {
           description: "Scientific intent; required for Experiment Mode",
@@ -232,30 +428,131 @@ export default function researchLoop(pi: ExtensionAPI): void {
       )),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const experiment = params.mode === "experiment"
-        && params.title
-        && params.question
-        && params.intent
-        && params.plannedDataScope
-        ? {
-            title: params.title,
-            question: params.question,
-            intent: params.intent,
-            plannedDataScope: params.plannedDataScope,
-            reference: params.reference,
-            artifactRoots: normalizeArtifactRoots(ctx.cwd, params.artifactRoots ?? []),
-          }
-        : undefined;
+      let experiment: ExperimentContext | undefined;
+      if (params.mode === "experiment") {
+        const resolved = await resolveExperiment(params, ctx);
+        if (typeof resolved === "string") {
+          return { content: [{ type: "text" as const, text: resolved }], details: { accepted: false, mode: params.mode } };
+        }
+        experiment = resolved;
+      }
       const decision = runtime.enterMode(params.mode, params.objective, experiment, ctx);
-      if (!decision.block) await syncRadar(ctx);
+      if (!decision.block) {
+        await syncRadar(ctx);
+        await refreshPropositionContext(ctx);
+      }
       const text = decision.block
         ? decision.reason ?? "Mode transition rejected."
-        : `Research Work Mode: ${params.mode.toUpperCase()}\nObjective: ${params.objective}`;
+        : [
+            `Research Work Mode: ${params.mode.toUpperCase()}`,
+            `Objective: ${params.objective}`,
+            ...(experiment ? [`Question ${experiment.questionId}: ${experiment.question}`] : []),
+          ].join("\n");
       return { content: [{ type: "text" as const, text }], details: { accepted: !decision.block, mode: params.mode } };
     },
     renderCall(args, theme) {
       const mode = (args as { mode?: string }).mode?.toUpperCase() ?? "MODE";
       return new Text(theme.fg("toolTitle", theme.bold(`Research ${mode}`)), 0, 0);
+    },
+    renderResult(result) {
+      return new Text(latexToUnicode(resultText(result)), 0, 0);
+    },
+  });
+
+  pi.registerTool({
+    name: "research_proposition",
+    label: "Research Proposition",
+    description:
+      "Manage the proposition that experiments test. create records a falsifiable proposition with 1-5 initial questions; revise restates it; both require the user's confirmation. add_question registers another question before experimenting on it. activate switches to an existing proposition. Not available in Experiment Mode.",
+    parameters: Type.Object({
+      action: StringEnum(["create", "revise", "add_question", "activate"] as const),
+      propositionId: Type.Optional(Type.String({ description: "Target proposition such as P2; defaults to the active proposition" })),
+      statement: Type.Optional(Type.String({ description: "create/revise: the proposition as one falsifiable sentence" })),
+      background: Type.Optional(Type.String({ description: "create: the observation or motivation behind the proposition" })),
+      questions: Type.Optional(Type.Array(
+        Type.Object({
+          question: Type.String({ description: "One question whose answer bears on the proposition" }),
+          rationale: Type.String({ description: "Why answering it tests the proposition" }),
+        }),
+        { minItems: 1, maxItems: 5, description: "create: initial decomposition of the proposition" },
+      )),
+      reason: Type.Optional(Type.String({ description: "revise: the evidence that requires the revision" })),
+      question: Type.Optional(Type.String({ description: "add_question: the question" })),
+      rationale: Type.Optional(Type.String({ description: "add_question: why it bears on the proposition" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const reply = (text: string, accepted: boolean) => ({
+        content: [{ type: "text" as const, text }],
+        details: { accepted, action: params.action },
+      });
+      if (runtime.workMode === "experiment") {
+        return reply("Finish the experiment with research_checkpoint before changing propositions.", false);
+      }
+      const { propositions } = stores(ctx);
+      const confirm = async (title: string, message: string) => {
+        if (!ctx.hasUI) return false;
+        runtime.setUserDecisionPending(true, ctx);
+        try {
+          return await ctx.ui.confirm(title, message);
+        } catch {
+          return false;
+        } finally {
+          runtime.setUserDecisionPending(false, ctx);
+        }
+      };
+      const declined = (what: string) => {
+        ctx.abort();
+        return reply(`The user did not confirm the ${what}. The turn was stopped; do not retry. Ask the user what should change.`, false);
+      };
+
+      if (params.action === "create") {
+        const questions = params.questions ?? [];
+        if (!params.statement?.trim() || questions.length === 0) {
+          return reply("create requires statement and at least one initial question.", false);
+        }
+        const summary = [
+          `命题：${params.statement.trim()}`,
+          ...(params.background?.trim() ? [`背景：${params.background.trim()}`] : []),
+          "",
+          ...questions.map((item, index) => `Q${index + 1}　${item.question}：${item.rationale}`),
+        ].join("\n");
+        if (!await confirm("建立研究命题？", latexToUnicode(summary))) return declined("proposition");
+        const record = await propositions.create({ statement: params.statement, background: params.background, questions });
+        runtime.setProposition(record.id, ctx);
+        await refreshPropositionContext(ctx);
+        return reply(`Proposition ${record.id} recorded and active.\n${record.questions.map((item) => `${item.id}: ${item.question}`).join("\n")}`, true);
+      }
+
+      const propositionId = params.propositionId?.trim() || runtime.propositionId;
+      const record = propositionId ? await propositions.find(propositionId) : undefined;
+      if (!record) return reply(`Proposition ${propositionId ?? "(none active)"} was not found.`, false);
+
+      if (params.action === "activate") {
+        runtime.setProposition(record.id, ctx);
+        await refreshPropositionContext(ctx);
+        return reply(`Proposition ${record.id} is active: ${record.statement}`, true);
+      }
+      if (params.action === "revise") {
+        if (!params.statement?.trim() || !params.reason?.trim()) return reply("revise requires statement and reason.", false);
+        const message = `原命题：${record.statement}\n修订为：${params.statement.trim()}\n理由：${params.reason.trim()}`;
+        if (!await confirm(`修订命题 ${record.id}？`, latexToUnicode(message))) return declined("revision");
+        await propositions.revise(record.id, params.statement, params.reason);
+        await refreshPropositionContext(ctx);
+        return reply(`Proposition ${record.id} revised.`, true);
+      }
+      if (!params.question?.trim() || !params.rationale?.trim()) {
+        return reply("add_question requires question and rationale.", false);
+      }
+      const added = await propositions.addQuestion(record.id, params.question, params.rationale, "agent");
+      await refreshPropositionContext(ctx);
+      return reply(`Registered ${added.id} under ${record.id}: ${added.question}`, true);
+    },
+    renderCall(args, theme) {
+      const action = (args as { action?: string }).action ?? "proposition";
+      return new Text(theme.fg("toolTitle", theme.bold(`Research Proposition · ${action}`)), 0, 0);
+    },
+    renderResult(result) {
+      return new Text(latexToUnicode(resultText(result)), 0, 0);
     },
   });
 
@@ -299,9 +596,35 @@ export default function researchLoop(pi: ExtensionAPI): void {
         runtime.setEnabled(value === "on", ctx);
         markArtifactRootsPersisted();
         await syncRadar(ctx);
+        if (value === "on") await activateLatestProposition(ctx);
         return;
       }
       ctx.ui.notify(`Research Loop: ${runtime.enabled ? "ON" : "OFF"}. Usage: /research on|off`, "info");
+    },
+  });
+
+  pi.registerCommand("proposition", {
+    description: "Show or switch the active research proposition",
+    handler: async (_args, ctx) => {
+      const records = await stores(ctx).propositions.list();
+      if (records.length === 0) {
+        ctx.ui.notify("No propositions yet. Describe the proposition to the agent with Research Loop on.", "info");
+        return;
+      }
+      const labels = records.map((record) => `${record.id}　${latexToUnicode(record.statement)}${record.id === runtime.propositionId ? "（当前）" : ""}`);
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify(labels.join("\n"), "info");
+        return;
+      }
+      if (runtime.workMode === "experiment") {
+        ctx.ui.notify(labels.join("\n"), "info");
+        return;
+      }
+      const selected = await ctx.ui.select("Research propositions", labels);
+      const record = records[labels.indexOf(selected ?? "")];
+      if (!record) return;
+      runtime.setProposition(record.id, ctx);
+      await refreshPropositionContext(ctx);
     },
   });
 
@@ -407,10 +730,14 @@ export default function researchLoop(pi: ExtensionAPI): void {
     const controlStateChanged = runtime.setArtifactRoots(sanitizedRoots, sanitizedCurrentRoots, false);
     if (restored.embeddedArtifacts || controlStateChanged) runtime.persistControlState();
     checkpointStore = undefined;
+    propositionStore = undefined;
     checkpointServer = undefined;
+    pendingHandoff = undefined;
 
     setImmediate(() => {
       void (async () => {
+        if (!isCurrentSession(ctx, generation, controller.signal)) return;
+        if (runtime.enabled) await activateLatestProposition(ctx);
         if (!isCurrentSession(ctx, generation, controller.signal)) return;
         if (restored.embeddedArtifacts) {
           const sanitizedArtifacts: ArtifactRecord[] = [];
@@ -459,6 +786,19 @@ export default function researchLoop(pi: ExtensionAPI): void {
     await checkpointServer?.stop();
     checkpointServer = undefined;
     checkpointStore = undefined;
+    propositionStore = undefined;
+    pendingHandoff = undefined;
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    const handoff = pendingHandoff;
+    pendingHandoff = undefined;
+    if (!handoff || handoff.generation !== sessionGeneration || !ctx.hasUI || !runtime.enabled) return;
+    try {
+      await runHandoff(handoff, ctx);
+    } catch (error) {
+      ctx.ui.notify(`Research handoff failed: ${String(error)}`, "warning");
+    }
   });
 
   pi.on("before_agent_start", (event, ctx) => {

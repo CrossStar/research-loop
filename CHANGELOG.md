@@ -4,6 +4,38 @@ All notable changes to Research Loop are documented in this file.
 
 ## Unreleased
 
+## 0.6.0 - 2026-09-28
+
+### Proposition-driven research chain
+
+- Add propositions stored in `checkpoints/propositions/P{n}.md` and the `research_proposition` tool (create, revise, add_question, activate). Creating or revising a proposition requires user confirmation.
+- Require Experiment Mode to answer one registered question of the active proposition and to register at least two predictions before the run.
+- Restructure checkpoints around the chain of reasoning: plugin-written proposition summary and reasoning path, why the experiment was run, design with the verbatim predictions, observations, judgment against each prediction, the verdict on the proposition, and new questions with proposed experiments. Checkpoint frontmatter moves to `schema_version: 2`.
+- After each checkpoint, present a handoff menu to choose the next question, add a question, or adopt a proposed proposition revision, then send an editable next-round instruction.
+- Inject the active proposition, open questions, and recent checkpoints into the policy; show the proposition and question in the footer.
+- Add `/proposition`, a proposition question-tree page and API to the Viewer, a proposition link on chained checkpoints, and a collapsed reproduction section.
+
+### Experiment design
+
+- Require every checkpoint to state its dataset (name, why it was chosen, basic facts or the synthetic generating process) and its key hyperparameters (value and reason). The plugin renders them at the start of the design section as a dataset block and a hyperparameter table, followed by the design thinking and the registered predictions.
+
+### Mathematics and visuals
+
+- Ask the agent to write every mathematical expression as LaTeX in replies and all research tool fields, to define symbols at first use, and to show numeric results as figures or tables.
+- Render LaTeX with MathJax everywhere in the Viewer: proposition statements, question trees, answers, history, sidebar, and table cells containing `|`.
+- Convert common LaTeX to Unicode for terminal display in checkpoint results, handoff menus, confirmation dialogs, and `/proposition`; files and agent-facing text keep the original LaTeX.
+- Ask experiment code to save one labeled figure per main comparison under the run's `figures/` directory.
+
+### Research governance
+
+- Inject a Soft Review reminder into the Experiment Mode policy every six actions, asking the agent to checkpoint when the evidence already answers the question; previously it only appeared in the footer.
+- Apply the reproduction scope-reduction approval to experiments declared with `intent: reproduction` instead of guessing from the user prompt wording.
+- Narrow the scope-reduction patterns so ordinary slicing such as `print(logits[:5])` and file inspection such as `head -n 20 results.csv` no longer trigger approval; data slicing and `head -n N ... >` subsets still do.
+
+### Removed
+
+- Remove the Claude Code adapter: plugin manifest, hooks, MCP server, status line, subagents, skill, and their tests. Research Loop now targets Pi only.
+
 ## 0.5.4 - 2026-08-28
 
 ### Pi startup and artifact hygiene

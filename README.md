@@ -1,14 +1,17 @@
 # Research Loop
 
-Research Loop 是一个面向 **Pi** 的 evidence-first 科研工作流插件。它为同一个 Agent session
-维护研究状态，提供 Brainstorming、Exploration 和 Experiment 三种工作模式，并把实验结果保存为
-长期可读的 Markdown Checkpoint。
+Research Loop 是一个面向 **Pi** 的 evidence-first 科研工作流插件。它围绕一个待验证的**命题**
+组织 human-in-the-loop 实验：命题被拆成问题，每次实验回答一个问题，每份 Checkpoint 说明结论对命题
+的影响以及由此产生的新问题，再由研究者决定下一步验证哪个问题。
 
 插件关注真实研究循环：理解问题、设计实验、执行并观察进度、检查结果、保存 artifacts、形成阶段性
 结论，然后进入下一轮实验。普通实现、文档修改和常规软件验证应关闭 Research Loop。
 
 ## 主要功能
 
+- **命题驱动的研究链**：命题 → 问题 → 实验 → Checkpoint → 新问题，Viewer 以问题树展示整条论证。
+- **事先预期**：进入实验前登记“若观察到……则说明……”，原样写入 Checkpoint 并逐条判断。
+- **人在环内的交接**：每份 Checkpoint 之后由研究者选择下一个问题、采纳或拒绝命题修订。
 - **三种 Work Mode**：Brainstorming、Exploration、Experiment。
 - **实验生命周期**：Experiment 必须通过 Checkpoint 或有效 Abort 正式结束。
 - **工具约束**：只读模式阻止实验执行和文件修改；Experiment Mode 允许实证工作。
@@ -37,7 +40,7 @@ pi install -l git:github.com/CrossStar/research-loop
 固定到某个 release：
 
 ```bash
-pi install git:github.com/CrossStar/research-loop@research-loop--v0.5.3
+pi install git:github.com/CrossStar/research-loop@research-loop--v0.6.0
 ```
 
 > Pi package 会以当前用户权限运行。安装第三方扩展前应检查源码。
@@ -87,27 +90,36 @@ Research Loop 默认关闭。在 Pi 中输入：
 /research on
 ```
 
-启用后从 Exploration Mode 开始。可以直接给 Agent 一个研究任务，例如：
+启用后从 Exploration Mode 开始。先告诉 Agent 你想验证的命题，例如：
 
 ```text
-请理解当前评估流程，并设计一个能够区分两种解释的实验。
+我想验证：对比学习预训练提升了小样本分类的准确率。
 ```
 
-开始实证执行前，Agent 会调用 `research_mode` 进入 Experiment Mode，并声明：
+Agent 会把它整理成一句可证伪的命题和 1–5 个初始问题，调用 `research_proposition` 登记。
+插件弹出确认框，你确认后才会写入 `checkpoints/propositions/P1.md`。
 
-- Research Question；
-- experiment title；
-- intent；
-- planned data scope；
-- reference protocol（如适用）；
-- project-relative artifact roots（已知输出目录时）。
+开始实证执行前，Agent 调用 `research_mode` 进入 Experiment Mode，并声明：
+
+- 要回答的问题编号（`questionId`，必须已在当前命题下登记）；
+- 这个实验为什么能回答该问题（`rationale`）；
+- 至少两条事先预期（`predictions`：若观察到……则说明……）；
+- experiment title、intent、planned data scope；
+- reference protocol（如适用）和 project-relative artifact roots（已知输出目录时）。
 
 实验产生可解释结果后，Agent 调用 `research_checkpoint`。插件会：
 
-1. 写入持久化 `checkpoint.md`；
+1. 写入持久化 `checkpoint.md`，并自动加上命题、推理位置和事先预期；
 2. 将状态返回 Exploration Mode；
 3. 在终端显示最新 Checkpoint URL；
-4. 保留真实实验 artifacts 的原始位置。
+4. Agent 停下后弹出交接菜单：选择下一个问题、提出新问题，或采纳命题修订建议；
+5. 选中问题后打开可编辑的下一轮指令，提交后自动开始下一轮。
+
+查看或切换命题：
+
+```text
+/proposition
+```
 
 关闭 Research Loop：
 
@@ -121,6 +133,34 @@ Research Loop 默认关闭。在 Pi 中输入：
 /artifacts
 /checkpoint-viewer
 ```
+
+## 命题驱动的研究链
+
+```text
+命题 P1   "对比学习预训练提升了小样本分类的准确率"
+ ├─ Q1 领先是否跨随机种子稳定？
+ │   └─ C1  支持：三个种子都领先 0.08
+ │       └─ Q3 领先是否来自更强的数据增强？      ← 由 C1 提出
+ │           └─ C2  削弱：统一增强后领先降到 0.02  → 建议收窄命题（待你确认）
+ └─ Q2 领先是否在其他数据集上成立？                ← 待验证
+```
+
+- **命题文件** `checkpoints/propositions/P{n}.md` 只保存命题陈述、登记的问题和修订记录。
+- **问题树由 Checkpoint 推导**：每份 Checkpoint 的 frontmatter 记录它回答的问题
+  （`question_id`）和它提出的新问题（`new_questions`），Viewer 扫描时组合成树，不另外维护账本。
+- **命题只有你能改**：建立和修订命题都需要你在确认框中批准；Agent 只能在 Checkpoint 中提出修订建议。
+- 进入 Experiment Mode 需要一个活跃命题；每个实验只回答一个已登记的问题。新问题要先用
+  `research_proposition add_question` 登记。
+- 同一时间只有一个活跃命题；新 session 会自动恢复最近更新的命题，`/proposition` 可以切换。
+
+`research_proposition` 的 action：
+
+| action | 作用 | 需要你确认 |
+| --- | --- | --- |
+| `create` | 建立命题及初始问题，并设为当前命题 | 是 |
+| `revise` | 修订命题陈述，写入修订记录 | 是 |
+| `add_question` | 在当前命题下登记新问题 | 否 |
+| `activate` | 切换到已有命题 | 否 |
 
 ## Work Modes
 
@@ -177,21 +217,37 @@ checkpoints/
     └── checkpoint.md
 ```
 
-`checkpoint.md` 包含 JSON-compatible frontmatter 和固定中文研究结构：
+`checkpoint.md` 包含 JSON-compatible frontmatter 和按论证顺序排列的中文结构：
 
 ```text
-Checkpoint：一句话标题
-1. 研究目的
-2. 实验设置
-3. 结果与分析
-4. 结论与下一步
-复现信息
+C{n}：一句话标题
+> 命题 · 推理位置 · 本轮问题 · 一句话答案 · 对命题的影响 · 新问题   （插件生成）
+1. 为什么做这个实验       问题来源由插件生成，Agent 补充此前证据留下的未决点
+2. 实验设计与事先预期     数据集（选择理由、基本信息）→ 关键超参数表 → 设计思路 → 事先预期表
+3. 实际观察               只放回答本轮问题所需的图表
+4. 对照预期的判断         逐条判断预期；对命题的影响；命题修订建议（如有）
+5. 新问题与下一步实验     每个新问题的来源、建议实验和事先预期
+复现信息                  Viewer 中默认折叠
 ```
 
-Writer 使用混合接口：四段主要正文使用自然 Markdown，protocol、reproduction 和 artifact references
-保持结构化并接受校验。
+插件负责命题、推理位置、问题来源和事先预期等链接信息；Agent 只写各节正文。protocol、reproduction
+和 artifact references 保持结构化并接受校验。
+
+### 数学公式
+
+所有数学表达式都写成 LaTeX：行内 `$...$`，独立公式 `$$...$$`。这条规则适用于命题、问题、事先预期、
+Checkpoint 标题、一句话答案和各节正文。符号在首次出现时定义。
+
+- Viewer 中所有位置都用 MathJax 渲染，包括正文、问题树、命题陈述、历史列表和侧栏；
+- 终端里的 Checkpoint 结果、交接菜单、确认框和 `/proposition` 列表会把常见 LaTeX 近似转换成
+  Unicode，例如 `$\hat{\beta}$` 显示为 `β̂`，`$n \approx d$` 显示为 `n ≈ d`；
+- Markdown 文件和发给 Agent 的内容始终保留原始 LaTeX。
 
 ### 图表规范
+
+涉及数值的结果应尽量用图或表展示：优先引用实验代码保存的图，精确数值用 Markdown 表格，没有现成图时
+用 `checkpoint-chart` 画简单的柱状图或折线图。实验代码会为每个主要比较在运行目录的 `figures/` 下保存
+一张图，并在旁边保存逐条件数值的 CSV。
 
 每个图表形成独立的“图（表）→ 正式标题 → 解析”单元：
 
@@ -249,10 +305,12 @@ Checkpoint 或调用 `/checkpoint-viewer` 时才会启动。
 主要路由：
 
 ```text
-/                   Checkpoint 历史
+/                   命题列表与 Checkpoint 历史
 /latest             最新 Checkpoint 的稳定入口
 /checkpoints/{id}   指定历史记录
+/propositions/{id}  命题的问题树
 /api/checkpoints    自动发现的 metadata
+/api/propositions   命题摘要
 /artifacts/{path}   项目内原始 artifact
 ```
 
@@ -262,6 +320,8 @@ Viewer 支持：
 - MathJax 公式；
 - 图片和正式图题；
 - `checkpoint-chart` bar/line 图；
+- 命题问题树：每个问题的来源、回答它的 Checkpoint、结论标记和待验证问题；
+- Checkpoint 顶部链接到所属命题；
 - 右侧章节目录和历史导航；
 - JSON Tree、Raw、键名搜索和大数组分组；
 - CSV 前 100 行预览；
@@ -387,8 +447,9 @@ Research Loop 会检测 active tools 中是否存在 `ask_user_question`。安�
 
 - 会改变科研解释的 protocol 或 data scope；
 - 多个成本或运行范围方案之间的选择；
-- 多个真正不同的下一实验分支；
-- Checkpoint 前需要用户选择的研究方向。
+- 多个真正不同的下一实验分支。
+
+Checkpoint 之后选择下一个问题由插件自己的交接菜单完成，不依赖这个集成。
 
 安装：
 
@@ -426,10 +487,11 @@ Pi footer 使用紧凑状态提示：
 
 ```text
 ◇ research  off
-◇ research  brainstorming · read only
-◇ research  exploration · read only
-◆ research  experiment · diagnostic · 3 actions · 1 output
-◆ research  experiment · reproduction · 6 actions · 3 outputs · review due
+◇ research  exploration · no proposition · read only
+◇ research  brainstorming · P1 · read only
+◇ research  exploration · P1 next Q3 · read only
+◆ research  experiment · P1 Q3 · diagnostic · 3 actions · 1 output
+◆ research  experiment · P1 Q1 · reproduction · 6 actions · 3 outputs · review due
 ◆ research  checkpoint · 2 results
 ```
 
@@ -470,6 +532,7 @@ research-loop/
 ├── src/runtime.ts                       # Pi Research State、policy 和 tool gate
 ├── src/checkpoint.ts                    # Checkpoint tool 与 TUI result
 ├── src/checkpoint-store.ts              # Markdown writer、discovery 和 validation
+├── src/proposition-store.ts            # 命题文件、问题树和 policy 摘要
 ├── src/checkpoint-server.ts             # Viewer server、renderer 和 artifact routes
 ├── src/checkpoint-report-template.html  # 唯一 Viewer HTML/CSS/JS
 ├── src/artifacts.ts                     # Artifact Radar 与 preview

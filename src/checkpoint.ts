@@ -9,11 +9,14 @@ import { resolveArtifactRecord, type ArtifactRecord } from "./artifacts.js";
 import { formatSshPortForwardCommand } from "./checkpoint-server.js";
 import {
   validateCheckpointDraft,
+  VERDICT_LABELS,
   type CheckpointArtifactInput,
+  type CheckpointChain,
   type CheckpointDraft,
   type PreparedCheckpointArtifact,
   type StoredCheckpoint,
 } from "./checkpoint-store.js";
+import { latexToUnicode } from "./latex-text.js";
 import { createTerminalImage } from "./terminal-image.js";
 
 interface SavedCheckpoint {
@@ -23,19 +26,28 @@ interface SavedCheckpoint {
 
 interface CheckpointDependencies {
   getArtifacts: () => ArtifactRecord[];
+  /** Resolves the proposition chain for the active experiment, or returns an error message. */
+  prepareChain: (newQuestionCount: number, ctx: ExtensionContext) => Promise<CheckpointChain | string>;
   save: (
     draft: CheckpointDraft,
     artifacts: PreparedCheckpointArtifact[],
+    chain: CheckpointChain,
     ctx: ExtensionContext,
   ) => Promise<SavedCheckpoint>;
-  onReached: (resultCount: number, ctx: ExtensionContext) => void;
+  onReached: (checkpoint: { stored: StoredCheckpoint; draft: CheckpointDraft; resultCount: number }, ctx: ExtensionContext) => void;
 }
 
 interface CheckpointToolDetails extends SavedCheckpoint {
   draft: CheckpointDraft;
+  chain: CheckpointChain;
   artifacts: PreparedCheckpointArtifact[];
   portForwardCommand?: string;
 }
+
+const PREDICTION = Type.Object({
+  observation: Type.String({ description: "若观察到的具体现象，最好带可比较的数值或方向" }),
+  implication: Type.String({ description: "则说明什么，对应到问题或命题" }),
+});
 
 export function registerResearchCheckpoint(
   pi: ExtensionAPI,
@@ -45,35 +57,69 @@ export function registerResearchCheckpoint(
     name: "research_checkpoint",
     label: "Research Checkpoint",
     description:
-      "Write a persistent Chinese Markdown research note for the completed experiment, save it under checkpoints/, and return Research Loop to Exploration Mode. The four Markdown bodies must read as a concise continuous research note rather than a log. Important figures must be referenced in resultsMarkdown. Call this alone as the final tool action.",
-    promptSnippet: "Write the completed experiment as a persistent Markdown checkpoint",
+      "Record the completed experiment as one link in the active proposition's chain of reasoning: why this question was asked, what was predicted, what was observed, how it bears on the proposition, and which new questions follow. Saves a Chinese Markdown note under checkpoints/ and returns Research Loop to Exploration Mode. Call this alone as the final tool action.",
+    promptSnippet: "Write the completed experiment as a proposition-linked Markdown checkpoint",
     promptGuidelines: [
+      "Write for a reader who knows the proposition but has not followed this session. The plugin already prints the proposition, the reasoning path, this round's question, and the registered predictions; do not repeat them, build on them.",
       "Write primarily in natural Chinese. Use Chinese (English term) the first time a necessary technical term appears, then use the Chinese term consistently.",
-      "The four bodies map to 研究目的、实验设置、结果与分析、结论与下一步. Do not repeat those level-one or level-two headings inside the bodies.",
-      "ResultsMarkdown must be the longest section and follow 实验现象 → 图表证据 → 图表含义 → 结果解释 → 局部结论. Every visual must form an independent 图（表）→ 正式标题 → 解析 unit, followed by a standalone --- separator before the next visual.",
-      "Follow 上表下图：write a table title above the Markdown table as ### 表 N　标题; put a figure title below the image by using 图 N　标题 as the Markdown image caption. Do not place a ### 图 heading above an image. After each table, image, or checkpoint-chart, write a prose paragraph explaining what its content means.",
+      "whyMarkdown explains what earlier evidence left unresolved and why this experiment can separate the explanations. dataset names the data, why it suits this question, and its basic facts (size, splits, features or inputs, labels or targets; for synthetic data, the generating process with its parameters). keyHyperparameters lists every setting that could change the conclusion, such as sample sizes, model size, regularization, learning rate, training length and number of seeds, each with its value and why it was chosen. designMarkdown explains the design thinking: conditions and controls, what is held fixed, the metric and the decision rule. Complete audit detail belongs in protocols and reproduction.",
+      "observationsMarkdown contains only the evidence needed to answer this round's question. Every visual forms an independent 图（表）→ 正式标题 → 解析 unit followed by a standalone --- separator. Table titles go above tables as ### 表 N　标题; figure titles go below images as the Markdown caption 图 N　标题.",
+      "predictionOutcomes judge each registered prediction in order. judgmentMarkdown explains the judgment, including anything unexpected, and states what this result cannot establish.",
+      "verdict states how this result bears on the proposition. When the result says the proposition should be narrowed or restated, put it in revisionProposal; only the user can adopt it.",
+      "newQuestions lists at most three questions that this result genuinely raised, each with why it arose, the experiment that would answer it, and at least two predictions. Leave it empty when no real question follows.",
       "Never use the Chinese contrast construction 不是……而是…… or close variants such as 并非……而是……、不在于……而在于……、而不是 and 而非 anywhere in a checkpoint. State the observation and conclusion directly.",
-      "Keep only result-essential settings in setupMarkdown. Put model revision, data revision, commit, seeds, full paths and audit details in structured reproduction/protocol fields.",
-      "Use a fenced checkpoint-chart block containing JSON for lightweight presentation-only bar or line charts. Never create a PNG solely for checkpoint decoration.",
+      "Write every formula, variable, estimator, metric definition and quantitative relation as LaTeX in every field: inline $...$, and display $$...$$ on its own lines for any equation the reader should study. Define each symbol at first use, for example $n$ 为训练样本数、$d$ 为特征维度. Prefer $\\hat{\\beta} = X^{+} y$ over code-style or plain-text math such as beta_hat = pinv(X) @ y or n/d.",
+      "Help the reader see the evidence. Whenever a result involves numbers, show the key comparison as a table or figure in observationsMarkdown: prefer figures the experiment code already saved, use a Markdown table for exact values across conditions, and use a fenced checkpoint-chart block containing JSON for a quick bar or line summary when no figure exists. designMarkdown may add a small conditions table titled ### 表 N, numbered in sequence with the observations. Never create a PNG solely for checkpoint decoration.",
       "For a reproduction, record paper, README and issue coverage plus every approved or unapproved deviation.",
     ],
     parameters: Type.Object({
-      title: Type.String({ description: "一句话概括本次实验及最重要现象，不加 Checkpoint 前缀" }),
+      title: Type.String({ description: "一句话概括本轮最重要的发现，不加 Checkpoint 或 C 编号前缀" }),
       experimentId: Type.Optional(Type.String({ description: "Stable experiment/run identifier when one exists" })),
-      shortConclusion: Type.String({ description: "第一屏显示的一句话最保守结论" }),
-      purposeMarkdown: Type.String({
-        description: "研究目的正文：前置现象、要区分的问题、解释 A/B、核心假设及双方预期；不要包含二级标题",
+      answer: Type.String({ description: "对本轮问题的一句话回答，保守且可被证据支持" }),
+      verdict: StringEnum(["supports", "weakens", "refutes", "inconclusive"] as const, {
+        description: "本轮结果对命题的影响",
       }),
-      setupMarkdown: Type.String({
-        description: "实验设置正文：系统、任务、主要条件差异、方法、必要参数、指标与预先判断标准；不要堆砌审计信息",
-      }),
-      resultsMarkdown: Type.String({
+      verdictReason: Type.String({ description: "一句话说明 verdict 的依据" }),
+      whyMarkdown: Type.String({ description: "为什么做这个实验：此前证据留下了什么未决问题，本实验为什么能区分不同解释；不要包含二级标题" }),
+      dataset: Type.Object({
+        name: Type.String({ description: "数据集名称及版本或 split；合成数据写明生成方式的名称" }),
+        reason: Type.String({ description: "为什么这个数据集适合回答本轮问题" }),
+        description: Type.String({ description: "基本信息：样本量、划分、特征或输入、标签或目标；合成数据写明生成过程及其参数" }),
+      }, { description: "本轮使用的数据集；由插件固定显示在实验设计开头" }),
+      keyHyperparameters: Type.Array(
+        Type.Object({
+          name: Type.String({ description: "参数名，数学量用 LaTeX" }),
+          value: Type.String({ description: "实际取值或扫描范围" }),
+          reason: Type.String({ description: "为什么取这个值" }),
+        }),
+        { minItems: 1, maxItems: 12, description: "会影响结论的关键超参数，例如样本量、模型规模、正则化、学习率、训练长度和种子数" },
+      ),
+      designMarkdown: Type.String({ description: "设计思路：条件与对照、固定不变的量、指标和判断规则；模型、指标和判断规则用 LaTeX 公式写出，条件较多时可用条件表；不要复述数据集、超参数和事先预期" }),
+      observationsMarkdown: Type.String({
         description:
-          "结果与分析正文，也是全文主体。表格使用上方三级标题“### 表 N　标题”；图片 caption 使用“图 N　标题”，由 Viewer 显示在图下方。每个表格、图片或 checkpoint-chart 后必须单独写解析段落并添加 ---。图片目标使用 artifacts 中的项目相对路径。轻量图表可使用 ```checkpoint-chart 后跟 JSON，其 title 必须是“图 N　标题”；bar 格式为 {type,title,items:[{label,value,color?}]}，line 格式为 {type,title,series:[{name,color?,points:[{x,y}]}]}",
+          "实际观察：只放回答本轮问题所需的证据，数值结果优先用图或表展示，数学关系用 LaTeX（行内 $...$，独立 $$...$$）。表格使用上方三级标题“### 表 N　标题”；图片 caption 使用“图 N　标题”。每个表格、图片或 checkpoint-chart 后必须单独写解析段落并添加 ---。图片目标使用 artifacts 中的项目相对路径。轻量图表可使用 ```checkpoint-chart 后跟 JSON，其 title 必须是“图 N　标题”；bar 格式为 {type,title,items:[{label,value,color?}]}，line 格式为 {type,title,series:[{name,color?,points:[{x,y}]}]}",
       }),
-      conclusionMarkdown: Type.String({
-        description: "结论与下一步正文：最终结论、关键证据、不能证明的内容、保守表述以及能直接区分机制的下一实验",
-      }),
+      predictionOutcomes: Type.Array(
+        Type.Object({
+          outcome: StringEnum(["observed", "partial", "not-observed"] as const),
+          note: Type.String({ description: "判断依据，引用具体数值或图表编号" }),
+        }),
+        { description: "按顺序逐条判断进入实验时登记的预期" },
+      ),
+      judgmentMarkdown: Type.String({ description: "对照预期的判断：解释判断、意外现象，以及本结果不能证明的内容" }),
+      newQuestions: Type.Array(
+        Type.Object({
+          question: Type.String({ description: "新问题，一句话" }),
+          whyItArose: Type.String({ description: "本轮哪个现象让这个问题出现" }),
+          proposedExperiment: Type.String({ description: "能回答它的下一个实验，包含关键对照" }),
+          predictions: Type.Array(PREDICTION, { minItems: 2, maxItems: 4 }),
+        }),
+        { maxItems: 3, description: "本轮结果真正引出的新问题；没有时传空数组" },
+      ),
+      revisionProposal: Type.Optional(Type.Object({
+        statement: Type.String({ description: "建议修订后的命题" }),
+        reason: Type.String({ description: "哪些证据要求修订" }),
+      }, { description: "仅当证据要求收窄或改写命题时填写；由用户决定是否采纳" })),
       protocols: Type.Array(
         Type.Object({
           title: Type.String({ description: "Protocol/run label" }),
@@ -130,6 +176,8 @@ export function registerResearchCheckpoint(
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const chain = await dependencies.prepareChain(params.newQuestions.length, ctx);
+      if (typeof chain === "string") return failure(chain);
       let artifacts: PreparedCheckpointArtifact[];
       try {
         artifacts = await prepareCheckpointArtifacts(
@@ -143,32 +191,42 @@ export function registerResearchCheckpoint(
       const draft: CheckpointDraft = {
         title: params.title,
         experimentId: params.experimentId,
-        shortConclusion: params.shortConclusion,
-        purposeMarkdown: params.purposeMarkdown,
-        setupMarkdown: params.setupMarkdown,
-        resultsMarkdown: params.resultsMarkdown,
-        conclusionMarkdown: params.conclusionMarkdown,
+        answer: params.answer,
+        verdict: params.verdict,
+        verdictReason: params.verdictReason,
+        whyMarkdown: params.whyMarkdown,
+        dataset: params.dataset,
+        keyHyperparameters: params.keyHyperparameters,
+        designMarkdown: params.designMarkdown,
+        observationsMarkdown: params.observationsMarkdown,
+        judgmentMarkdown: params.judgmentMarkdown,
+        predictionOutcomes: params.predictionOutcomes,
+        newQuestions: params.newQuestions,
+        revisionProposal: params.revisionProposal,
         protocols: params.protocols,
         reproduction: params.reproduction,
       };
-      const validation = validateCheckpointDraft(draft, artifacts);
+      const validation = validateCheckpointDraft(draft, artifacts, chain.predictions.length);
       if (validation.errors.length) return failure(validation.errors.join("\n"));
       validation.warnings.forEach((warning) => ctx.ui.notify(warning, "warning"));
 
       let saved: SavedCheckpoint;
       try {
-        saved = await dependencies.save(draft, artifacts, ctx);
+        saved = await dependencies.save(draft, artifacts, chain, ctx);
       } catch (error) {
         return failure(`Checkpoint Markdown could not be saved: ${String(error)}`);
       }
       const portForwardCommand = saved.viewerUrl
         ? formatSshPortForwardCommand(saved.viewerUrl)
         : undefined;
-      dependencies.onReached(artifacts.length, ctx);
-      const details: CheckpointToolDetails = { draft, artifacts, ...saved, portForwardCommand };
+      dependencies.onReached({ stored: saved.stored, draft, resultCount: artifacts.length }, ctx);
+      const details: CheckpointToolDetails = { draft, chain, artifacts, ...saved, portForwardCommand };
+      const newQuestions = draft.newQuestions.map((item, index) => `  ${chain.newQuestionIds[index]} ${item.question}`);
       const lines = [
-        "✓ Experiment completed",
-        "✓ Checkpoint generated",
+        `✓ C${chain.sequence} answered ${chain.question.id}`,
+        `Answer: ${draft.answer}`,
+        `Proposition ${chain.proposition.id}: ${VERDICT_LABELS[draft.verdict]}`,
+        ...(newQuestions.length ? ["New questions:", ...newQuestions] : []),
         "",
         `Saved: ${saved.stored.relativeMarkdownPath}`,
         saved.viewerUrl ? `\nCheckpoint:\n${saved.viewerUrl}` : undefined,
@@ -241,13 +299,18 @@ async function resolveCheckpointArtifactRecord(cwd: string, inputPath: string): 
 
 function renderCheckpointResult(details: CheckpointToolDetails, theme: Theme, expanded: boolean): Container {
   const container = new Container();
-  container.addChild(new Text(theme.fg("success", theme.bold("✓ Experiment completed\n✓ Checkpoint generated")), 0, 0));
-  container.addChild(new Text(theme.bold(details.draft.title), 0, 1));
-  container.addChild(new Text(details.draft.shortConclusion, 0, 0));
+  const { chain, draft } = details;
+  container.addChild(new Text(theme.fg("success", theme.bold(`✓ C${chain.sequence} · ${chain.proposition.id} / ${chain.question.id}`)), 0, 0));
+  container.addChild(new Text(theme.bold(latexToUnicode(draft.title)), 0, 1));
+  container.addChild(new Text(`${theme.fg("muted", "答案")} ${latexToUnicode(draft.answer)}`, 0, 0));
+  container.addChild(new Text(`${theme.fg("muted", "命题")} ${VERDICT_LABELS[draft.verdict]}：${latexToUnicode(draft.verdictReason)}`, 0, 0));
+  draft.newQuestions.forEach((item, index) => {
+    container.addChild(new Text(`${theme.fg("accent", chain.newQuestionIds[index] ?? "Q")} ${latexToUnicode(item.question)}`, 0, 0));
+  });
   if (expanded) details.artifacts.filter((item) => item.role === "evidence" && checkpointImageMime(item.artifact.extension)).forEach((item) => {
     try {
       const data = readFileSync(item.absolutePath).toString("base64");
-      container.addChild(new Text(`${theme.bold(item.title)}\n${item.description}`, 0, 1));
+      container.addChild(new Text(`${theme.bold(latexToUnicode(item.title))}\n${latexToUnicode(item.description)}`, 0, 1));
       container.addChild(
         createTerminalImage(
           data,

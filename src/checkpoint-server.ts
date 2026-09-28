@@ -7,6 +7,8 @@ import { extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Marked, Renderer, type Tokens } from "marked";
 import { CheckpointStore, type DiscoveredCheckpoint } from "./checkpoint-store.js";
+import { latexToUnicode } from "./latex-text.js";
+import { buildPropositionTree, PropositionStore } from "./proposition-store.js";
 
 const DEFAULT_HOST = "127.0.0.1";
 const ALL_INTERFACES_HOST = "0.0.0.0";
@@ -36,6 +38,7 @@ export class CheckpointViewerServer {
   private readonly basePort: number;
   private readonly templateOverride?: string;
   private readonly templatePath: string;
+  private readonly propositions: PropositionStore;
   private server?: Server;
   private port?: number;
   private startPromise?: Promise<void>;
@@ -44,6 +47,7 @@ export class CheckpointViewerServer {
     readonly store: CheckpointStore,
     options: CheckpointViewerServerOptions = {},
   ) {
+    this.propositions = new PropositionStore(store);
     this.host = options.host ?? envHost();
     this.basePort = normalizeBasePort(options.basePort ?? envBasePort());
     this.templateOverride = options.template;
@@ -142,13 +146,71 @@ export class CheckpointViewerServer {
       send(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true }), request.method === "HEAD");
       return;
     }
-    if (url.pathname === "/" || url.pathname === "/latest" || /^\/checkpoints\/[^/]+$/.test(url.pathname)) {
+    if (
+      url.pathname === "/"
+      || url.pathname === "/latest"
+      || /^\/checkpoints\/[^/]+$/.test(url.pathname)
+      || /^\/propositions\/P\d+$/.test(url.pathname)
+    ) {
       sendHtml(response, template, request.method === "HEAD");
       return;
     }
     if (url.pathname === "/api/checkpoints") {
       const checkpoints = await this.store.list();
       sendJson(response, 200, checkpoints.map((item) => historyEntry(item)), request.method === "HEAD");
+      return;
+    }
+    if (url.pathname === "/api/propositions") {
+      const [records, checkpoints] = await Promise.all([this.propositions.list(), this.store.list()]);
+      sendJson(response, 200, records.map((record) => {
+        const tree = buildPropositionTree(record, checkpoints);
+        return {
+          id: record.id,
+          statement: record.statement,
+          statement_html: mathTextHtml(record.statement),
+          updated_at: record.updated_at,
+          url: `/propositions/${record.id}`,
+          questions: tree.questions.length,
+          open_questions: tree.questions.filter((question) => question.status === "open").length,
+          checkpoints: tree.checkpoints.length,
+          latest_answer: tree.checkpoints.at(-1)?.answer,
+          latest_answer_html: mathTextHtml(tree.checkpoints.at(-1)?.answer),
+        };
+      }), request.method === "HEAD");
+      return;
+    }
+    const propositionMatch = url.pathname.match(/^\/api\/propositions\/(P\d+)$/);
+    if (propositionMatch) {
+      const tree = await this.propositions.tree(propositionMatch[1]);
+      if (!tree) {
+        sendJson(response, 404, { error: "Proposition not found." }, request.method === "HEAD");
+        return;
+      }
+      sendJson(response, 200, {
+        proposition: {
+          ...tree.proposition,
+          statement_html: mathTextHtml(tree.proposition.statement),
+          background_html: mathTextHtml(tree.proposition.background),
+          revisions: tree.proposition.revisions.map((revision) => ({
+            ...revision,
+            previous_html: mathTextHtml(revision.previous),
+            statement_html: mathTextHtml(revision.statement),
+            reason_html: mathTextHtml(revision.reason),
+          })),
+        },
+        questions: tree.questions.map((question) => ({
+          ...question,
+          question_html: mathTextHtml(question.question),
+          origin_html: mathTextHtml(question.origin),
+          proposed_experiment_html: mathTextHtml(question.proposed_experiment),
+        })),
+        checkpoints: tree.checkpoints.map((checkpoint) => ({
+          ...checkpoint,
+          title_html: mathTextHtml(checkpoint.title),
+          answer_html: mathTextHtml(checkpoint.answer),
+          url: `/checkpoints/${encodeURIComponent(checkpoint.id)}`,
+        })),
+      }, request.method === "HEAD");
       return;
     }
     if (url.pathname === "/api/latest") {
@@ -279,7 +341,11 @@ export function formatSshPortForwardCommand(
 function renderCheckpoint(store: CheckpointStore, checkpoint: DiscoveredCheckpoint) {
   const { html, toc } = renderMarkdown(store, checkpoint);
   return {
-    metadata: checkpoint.metadata,
+    metadata: {
+      ...checkpoint.metadata,
+      short_conclusion_html: mathTextHtml(checkpoint.metadata.short_conclusion),
+      title_text: latexToUnicode(checkpoint.metadata.title),
+    },
     markdown_path: checkpoint.relativeMarkdownPath,
     html,
     toc,
@@ -340,6 +406,13 @@ function renderMarkdown(store: CheckpointStore, checkpoint: DiscoveredCheckpoint
   const marked = new Marked({ gfm: true, breaks: false, renderer });
   const rendered = String(marked.parse(protectedMath.markdown));
   return { html: protectedMath.restore(rendered), toc };
+}
+
+/** Plain-text metadata as escaped HTML whose TeX segments carry MathJax delimiters, using the same rules as checkpoint bodies. */
+export function mathTextHtml(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  const math = protectMathSegments(text);
+  return math.restore(escapeHtml(math.markdown));
 }
 
 function protectMathSegments(markdown: string): { markdown: string; restore: (html: string) => string } {
@@ -416,6 +489,8 @@ function markdownTarget(
 function historyEntry(checkpoint: DiscoveredCheckpoint) {
   return {
     ...checkpoint.metadata,
+    title_html: mathTextHtml(checkpoint.metadata.title),
+    short_conclusion_html: mathTextHtml(checkpoint.metadata.short_conclusion),
     markdown_path: checkpoint.relativeMarkdownPath,
     url: `/checkpoints/${encodeURIComponent(checkpoint.metadata.id)}`,
   };

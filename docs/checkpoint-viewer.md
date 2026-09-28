@@ -18,8 +18,6 @@ Browser
 Experiment Runner 决定真实结果是什么；Checkpoint Writer 决定本次实验最重要的信息如何表达；
 Viewer 只决定这些内容如何阅读。Writer 不生成 HTML，Viewer 不修改科研结论。
 
-> 当前持久化 Writer 与 Viewer 只在 Pi adapter 启用。Claude MCP 保持原有 checkpoint report。
-
 ## 存储与发现
 
 默认目录：
@@ -53,55 +51,71 @@ Viewer 不依赖 manifest 或数据库，而是扫描 checkpoint 目录。对没
 
 Pi `research_checkpoint` 使用混合接口：
 
-- `purposeMarkdown`：研究目的正文；
-- `setupMarkdown`：实验设置正文；
-- `resultsMarkdown`：结果与分析正文；
-- `conclusionMarkdown`：结论与下一步正文；
+- `answer`：对本轮问题的一句话回答；
+- `verdict` / `verdictReason`：对命题的影响（supports、weakens、refutes、inconclusive）及依据；
+- `whyMarkdown`：为什么做这个实验；
+- `dataset`：数据集名称、选择理由和基本信息（样本量、划分、特征、标签；合成数据写生成过程）；
+- `keyHyperparameters`：会影响结论的关键超参数，每项包含取值和选择理由；
+- `designMarkdown`：设计思路，包括条件与对照、固定不变的量、指标和判断规则；
+- `observationsMarkdown`：实际观察，图表只放在这一节；
+- `predictionOutcomes`：按顺序逐条判断进入实验时登记的预期（observed、partial、not-observed）；
+- `judgmentMarkdown`：对照预期的判断，包括意外现象和不能证明的内容；
+- `newQuestions`：最多三个新问题，每个包含来源、建议实验和至少两条事先预期；
+- `revisionProposal`：可选的命题修订建议，由用户决定是否采纳；
 - `protocols`：intent、reference、data scope、sources、deviations；
 - `reproduction`：模型、数据、commit、seeds、参数和环境；
 - `artifacts`：真实实验文件及其语义。
 
-插件负责 frontmatter、固定标题、复现信息、Protocol 审计和 artifact 文件列表。Agent 只负责连续
-科研叙述，不需要知道 Viewer 的 HTML 结构。
+插件负责 frontmatter、C 编号、命题摘要、推理位置、问题来源、事先预期表、判断表、新问题编号、
+复现信息和 artifact 文件列表。Agent 只负责各节正文。
 
 生成的正文固定为：
 
 ```markdown
-# Checkpoint：{一句话概括实验及最重要现象}
+# C{n}：{一句话概括本轮最重要的发现}
 
-## 1. 研究目的
+> **命题 P1**：…
+> **推理位置**：P1 → Q1（C1：…） → **Q3（本轮）**
+> **本轮问题 Q3**：…
+> **一句话答案**：…
+> **对命题的影响**：削弱。…
+> **新问题**：Q5
 
-{前置现象、问题、解释 A/B、核心假设及双方预期}
+## 1. 为什么做这个实验
+{插件：Q3 由 C1 提出 / 来自命题拆解} {Agent：此前证据留下的未决点}
 
----
+## 2. 实验设计与事先预期
+### 数据集          {插件：名称、选择理由、基本信息}
+### 关键超参数      {插件：参数 | 取值 | 选择理由}
+### 设计思路        {Agent：条件、对照、固定量、指标和判断规则}
+{插件：事先预期表}
 
-## 2. 实验设置
+## 3. 实际观察
+{Agent：回答本轮问题所需的图表与解析}
 
-{系统、任务、条件差异、方法、必要参数、指标和预先判断标准}
+## 4. 对照预期的判断
+{插件：逐条判断表} {Agent：判断说明} {插件：对命题的影响、修订建议}
 
----
-
-## 3. 结果与分析
-
-{核心发现；图表；图表含义；结果解释；局部结论；必要的第二张图或精确表格}
-
----
-
-## 4. 结论与下一步
-
-{最终结论、关键证据、不能证明的内容、保守表述和下一实验}
-
----
+## 5. 新问题与下一步实验
+{插件：### Q5　问题，来源、建议实验和事先预期}
 
 ## 复现信息
-
 {结构化 reproduction、files 和 protocol audit}
 ```
+
+frontmatter（`schema_version: 2`）额外记录 `proposition_id`、`question_id`、`sequence`、`verdict`、
+`new_questions` 和 `revision_proposal`。Viewer 通过这些字段组合命题问题树。没有这些字段的旧
+checkpoint 照常显示，只是不出现在任何命题的树中。命题文件位于 `checkpoints/propositions/`，
+不会被当作 checkpoint 扫描。
 
 ## 写作约束
 
 - 正文优先使用自然中文；必要术语首次写为“中文（English term）”。
-- 结果与分析应是全文主体。
+- 所有字段中的数学表达式都写成 LaTeX（行内 `$...$`，独立 `$$...$$`），符号在首次出现时定义。
+  Viewer 的所有位置都会渲染公式；终端显示近似的 Unicode；文件保留原始 LaTeX。
+- 涉及数值的结果优先用图或表展示；实验设计可以包含一个编号连续的条件表。
+- 为读者写：他知道命题，但没有跟随本 session。不要复述插件已经写出的命题、推理位置和预期。
+- 实际观察只放回答本轮问题所需的证据；审计细节放进 protocols 和 reproduction。
 - 每张重要图表必须出现在对应分析位置，并解释读者应该观察什么及其研究含义。
 - 每个图表形成独立的“图（表）→ 正式标题 → 解析”单元；解析后使用独立的 `---` 浅色分隔线，再进入下一个图表。
 - 标题遵循“上表下图”：表题位于表格上方，图题位于图片或动态图表下方。
@@ -109,7 +123,7 @@ Pi `research_checkpoint` 使用混合接口：
 - Checkpoint 全文禁止使用“不是……而是……”“并非……而是……”“不在于……而在于……”“而不是”和“而非”等转折句式，直接陈述观察与结论。
 - 实验设置只保留理解结果所需的信息。
 - 完整版本、commit、seeds、路径和 protocol audit 统一放在复现信息中。
-- `shortConclusion` 显示在 Viewer 第一屏，必须采用最保守且可由证据支持的表述。
+- `answer` 显示在 Checkpoint 顶部摘要和问题树中，必须采用最保守且可由证据支持的表述。
 
 ## Artifact 引用
 
@@ -214,11 +228,14 @@ Viewer 不参与 `session_start`。首次保存 Checkpoint 或调用 `/checkpoin
 Viewer 默认绑定 `127.0.0.1`，从 `43119` 开始寻找空闲端口：
 
 ```text
-/                   checkpoint history
+/                   propositions and checkpoint history
 /latest             latest checkpoint
 /checkpoints/{id}   one checkpoint
+/propositions/{id}  proposition question tree
 /api/checkpoints    discovered metadata
 /api/latest         rendered latest checkpoint payload
+/api/propositions   proposition summaries
+/api/propositions/{id}  question tree payload
 /artifacts/{path}   original project artifact
 ```
 

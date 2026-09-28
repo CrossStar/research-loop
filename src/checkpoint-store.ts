@@ -1,11 +1,65 @@
 import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ArtifactRecord } from "./artifacts.js";
+import type { ExperimentPrediction } from "./core/types.js";
+import { latexToUnicode } from "./latex-text.js";
 
 export type CheckpointIntent = "reproduction" | "diagnostic" | "exploratory" | "ablation";
 export type CheckpointSourceKind = "paper" | "readme" | "issue";
 export type CheckpointSourceStatus = "consulted" | "not-found" | "inaccessible";
 export type CheckpointArtifactRole = "evidence" | "diagnostic" | "dataset" | "intermediate";
+export type CheckpointVerdict = "supports" | "weakens" | "refutes" | "inconclusive";
+export type PredictionOutcomeKind = "observed" | "partial" | "not-observed";
+
+export const VERDICT_LABELS: Record<CheckpointVerdict, string> = {
+  supports: "支持",
+  weakens: "削弱",
+  refutes: "否定",
+  inconclusive: "尚无定论",
+};
+const OUTCOME_LABELS: Record<PredictionOutcomeKind, string> = {
+  observed: "出现",
+  partial: "部分出现",
+  "not-observed": "未出现",
+};
+
+/** Reader-facing design facts rendered in a fixed place so the user can check them; audit detail stays in reproduction. */
+export interface CheckpointDataset {
+  name: string;
+  reason: string;
+  description: string;
+}
+
+export interface CheckpointHyperparameter {
+  name: string;
+  value: string;
+  reason: string;
+}
+
+export interface PredictionOutcome {
+  outcome: PredictionOutcomeKind;
+  note: string;
+}
+
+export interface CheckpointNewQuestionInput {
+  question: string;
+  whyItArose: string;
+  proposedExperiment: string;
+  predictions: ExperimentPrediction[];
+}
+
+export interface CheckpointNewQuestion {
+  id: string;
+  question: string;
+  why_it_arose: string;
+  proposed_experiment: string;
+  predictions: ExperimentPrediction[];
+}
+
+export interface PropositionRevisionProposal {
+  statement: string;
+  reason: string;
+}
 
 export interface CheckpointSource {
   kind: CheckpointSourceKind;
@@ -64,23 +118,50 @@ export interface PreparedCheckpointArtifact extends CheckpointArtifactInput {
 export interface CheckpointDraft {
   title: string;
   experimentId?: string;
-  shortConclusion: string;
-  purposeMarkdown: string;
-  setupMarkdown: string;
-  resultsMarkdown: string;
-  conclusionMarkdown: string;
+  answer: string;
+  verdict: CheckpointVerdict;
+  verdictReason: string;
+  whyMarkdown: string;
+  dataset: CheckpointDataset;
+  keyHyperparameters: CheckpointHyperparameter[];
+  designMarkdown: string;
+  observationsMarkdown: string;
+  judgmentMarkdown: string;
+  predictionOutcomes: PredictionOutcome[];
+  newQuestions: CheckpointNewQuestionInput[];
+  revisionProposal?: PropositionRevisionProposal;
   protocols: CheckpointProtocol[];
   reproduction: CheckpointReproduction;
 }
 
+/** Where this checkpoint sits in the proposition's chain of reasoning; resolved by the plugin, not written by the agent. */
+export interface CheckpointChain {
+  proposition: { id: string; statement: string };
+  question: { id: string; question: string; origin: string };
+  path: Array<{ questionId: string; via?: { sequence: number; answer: string } }>;
+  raisedBy?: { sequence: number; title: string };
+  predictions: ExperimentPrediction[];
+  sequence: number;
+  newQuestionIds: string[];
+}
+
 export interface CheckpointMetadata {
-  schema_version: 1;
+  schema_version: 1 | 2;
   id: string;
   title: string;
   created_at: string;
   experiment_id?: string;
+  /** The one-line answer to the checkpoint's question; kept under its v1 name for older readers. */
   short_conclusion: string;
   artifact_paths: string[];
+  proposition_id?: string;
+  question_id?: string;
+  question?: string;
+  sequence?: number;
+  verdict?: CheckpointVerdict;
+  verdict_reason?: string;
+  new_questions?: CheckpointNewQuestion[];
+  revision_proposal?: PropositionRevisionProposal;
 }
 
 export interface StoredCheckpoint {
@@ -106,24 +187,42 @@ export class CheckpointStore {
     this.checkpointRoot = resolveInside(this.projectRoot, configuredRoot);
   }
 
-  async write(draft: CheckpointDraft, artifacts: PreparedCheckpointArtifact[]): Promise<StoredCheckpoint> {
+  async write(
+    draft: CheckpointDraft,
+    artifacts: PreparedCheckpointArtifact[],
+    chain: CheckpointChain,
+  ): Promise<StoredCheckpoint> {
     await mkdir(this.checkpointRoot, { recursive: true });
     await assertCheckpointRootSafe(this.projectRoot, this.checkpointRoot);
     const createdAt = new Date();
-    const baseId = `checkpoint-${compactTimestamp(createdAt)}-${slugify(draft.title)}`;
+    const baseId = `checkpoint-${compactTimestamp(createdAt)}-${slugify(latexToUnicode(draft.title))}`;
     const { id, directory } = await reserveDirectory(this.checkpointRoot, baseId);
 
     const metadata: CheckpointMetadata = {
-      schema_version: 1,
+      schema_version: 2,
       id,
       title: draft.title.trim(),
       created_at: createdAt.toISOString(),
       experiment_id: draft.experimentId?.trim() || undefined,
-      short_conclusion: draft.shortConclusion.trim(),
+      short_conclusion: draft.answer.trim(),
       artifact_paths: artifacts.map((item) => item.artifact.path),
+      proposition_id: chain.proposition.id,
+      question_id: chain.question.id,
+      question: chain.question.question,
+      sequence: chain.sequence,
+      verdict: draft.verdict,
+      verdict_reason: draft.verdictReason.trim(),
+      new_questions: draft.newQuestions.map((item, index) => ({
+        id: chain.newQuestionIds[index]!,
+        question: item.question.trim(),
+        why_it_arose: item.whyItArose.trim(),
+        proposed_experiment: item.proposedExperiment.trim(),
+        predictions: item.predictions,
+      })),
+      revision_proposal: draft.revisionProposal,
     };
     const markdownPath = resolve(directory, "checkpoint.md");
-    const markdown = buildCheckpointMarkdown(draft, metadata, artifacts, directory);
+    const markdown = buildCheckpointMarkdown(draft, metadata, chain, artifacts, directory);
     const temporaryPath = `${markdownPath}.tmp-${process.pid}-${Date.now()}`;
     try {
       await writeFile(temporaryPath, markdown, "utf8");
@@ -144,7 +243,7 @@ export class CheckpointStore {
     let files: string[];
     try {
       await assertCheckpointRootSafe(this.projectRoot, this.checkpointRoot);
-      files = await collectMarkdownFiles(this.checkpointRoot, 3);
+      files = await collectMarkdownFiles(this.checkpointRoot, 3, new Set([resolve(this.checkpointRoot, "propositions")]));
     } catch {
       return [];
     }
@@ -175,13 +274,15 @@ export class CheckpointStore {
       const title = parsed.metadata?.title || extractTitle(parsed.body) || fallbackId;
       const createdAt = validDate(parsed.metadata?.created_at) ?? fileStat.mtime.toISOString();
       const metadata: CheckpointMetadata = {
-        schema_version: 1,
+        ...parsed.metadata,
+        schema_version: parsed.metadata?.schema_version === 2 ? 2 : 1,
         id: parsed.metadata?.id || fallbackId,
         title,
         created_at: createdAt,
         experiment_id: parsed.metadata?.experiment_id,
         short_conclusion: parsed.metadata?.short_conclusion || extractShortConclusion(parsed.body),
         artifact_paths: Array.isArray(parsed.metadata?.artifact_paths) ? parsed.metadata.artifact_paths : [],
+        new_questions: Array.isArray(parsed.metadata?.new_questions) ? parsed.metadata.new_questions : undefined,
       };
       return {
         metadata,
@@ -199,25 +300,137 @@ export class CheckpointStore {
 export function buildCheckpointMarkdown(
   draft: CheckpointDraft,
   metadata: CheckpointMetadata,
+  chain: CheckpointChain,
   artifacts: PreparedCheckpointArtifact[],
   checkpointDirectory: string,
 ): string {
   const rewrite = (text: string) => rewriteArtifactReferences(text.trim(), artifacts, checkpointDirectory);
-  const resultsMarkdown = rewrite(draft.resultsMarkdown);
+  const observations = rewrite(draft.observationsMarkdown);
+  const newQuestions = metadata.new_questions ?? [];
   const sections = [
     `---\n${JSON.stringify(metadata)}\n---`,
-    `# Checkpoint：${draft.title.trim()}`,
-    `## 1. 研究目的\n\n${rewrite(draft.purposeMarkdown)}`,
+    `# C${chain.sequence}：${draft.title.trim()}`,
+    formatChainSummary(draft, chain, newQuestions),
+    `## 1. 为什么做这个实验\n\n${formatOrigin(chain)}\n\n${rewrite(draft.whyMarkdown)}`,
     "---",
-    `## 2. 实验设置\n\n${rewrite(draft.setupMarkdown)}`,
+    `## 2. 实验设计与事先预期\n\n${formatDesign(draft, rewrite)}\n\n${formatPredictionTable(chain.predictions)}`,
     "---",
-    `## 3. 结果与分析\n\n${resultsMarkdown}`,
-    ...(/^\s*---+\s*$/.test(resultsMarkdown.split(/\r?\n/).at(-1) ?? "") ? [] : ["---"]),
-    `## 4. 结论与下一步\n\n${rewrite(draft.conclusionMarkdown)}`,
+    `## 3. 实际观察\n\n${observations}`,
+    ...(/^\s*---+\s*$/.test(observations.split(/\r?\n/).at(-1) ?? "") ? [] : ["---"]),
+    `## 4. 对照预期的判断\n\n${formatJudgment(draft, chain, rewrite)}`,
+    "---",
+    `## 5. 新问题与下一步实验\n\n${formatNewQuestions(newQuestions)}`,
     "---",
     `## 复现信息\n\n${formatReproduction(draft, artifacts, checkpointDirectory)}`,
   ];
   return `${sections.join("\n\n")}\n`;
+}
+
+function formatChainSummary(
+  draft: CheckpointDraft,
+  chain: CheckpointChain,
+  newQuestions: CheckpointNewQuestion[],
+): string {
+  const path = [
+    chain.proposition.id,
+    ...chain.path.map((step) => step.via
+      ? `${step.questionId}（C${step.via.sequence}：${step.via.answer}）`
+      : `**${step.questionId}（本轮）**`),
+  ].join(" → ");
+  return [
+    `> **命题 ${chain.proposition.id}**：${chain.proposition.statement}  `,
+    `> **推理位置**：${path}  `,
+    `> **本轮问题 ${chain.question.id}**：${chain.question.question}  `,
+    `> **一句话答案**：${draft.answer.trim()}  `,
+    `> **对命题的影响**：${VERDICT_LABELS[draft.verdict]}。${draft.verdictReason.trim()}  `,
+    `> **新问题**：${newQuestions.length ? newQuestions.map((item) => item.id).join("、") : "无"}`,
+  ].join("\n");
+}
+
+function formatOrigin(chain: CheckpointChain): string {
+  const origin = chain.question.origin.trim();
+  return chain.raisedBy
+    ? `${chain.question.id} 由 C${chain.raisedBy.sequence}（${chain.raisedBy.title}）提出：${origin}`
+    : `${chain.question.id} 来自命题 ${chain.proposition.id} 的拆解：${origin}`;
+}
+
+function formatDesign(draft: CheckpointDraft, rewrite: (text: string) => string): string {
+  const { dataset } = draft;
+  return [
+    "### 数据集",
+    "",
+    `**${dataset.name.trim()}**`,
+    "",
+    `* **选择理由：** ${dataset.reason.trim()}`,
+    `* **基本信息：** ${dataset.description.trim()}`,
+    "",
+    "### 关键超参数",
+    "",
+    "| 参数 | 取值 | 选择理由 |",
+    "| --- | --- | --- |",
+    ...draft.keyHyperparameters.map((item) => `| ${tableCell(item.name)} | ${tableCell(item.value)} | ${tableCell(item.reason)} |`),
+    "",
+    "### 设计思路",
+    "",
+    rewrite(draft.designMarkdown),
+  ].join("\n");
+}
+
+function formatPredictionTable(predictions: ExperimentPrediction[]): string {
+  return [
+    "**事先预期**（进入实验前登记，之后未修改）",
+    "",
+    "| 预期 | 若观察到 | 则说明 |",
+    "| --- | --- | --- |",
+    ...predictions.map((prediction, index) => `| 预期 ${index + 1} | ${tableCell(prediction.observation)} | ${tableCell(prediction.implication)} |`),
+  ].join("\n");
+}
+
+function formatJudgment(
+  draft: CheckpointDraft,
+  chain: CheckpointChain,
+  rewrite: (text: string) => string,
+): string {
+  const rows = chain.predictions.map((prediction, index) => {
+    const outcome = draft.predictionOutcomes[index];
+    const label = outcome ? OUTCOME_LABELS[outcome.outcome] : "未判断";
+    return `| 预期 ${index + 1} | ${tableCell(prediction.observation)} | ${label} | ${tableCell(outcome?.note ?? "")} |`;
+  });
+  const lines = [
+    "| 预期 | 若观察到 | 实际 | 依据 |",
+    "| --- | --- | --- | --- |",
+    ...rows,
+    "",
+    rewrite(draft.judgmentMarkdown),
+    "",
+    `**对命题的影响：** ${VERDICT_LABELS[draft.verdict]}。${draft.verdictReason.trim()}`,
+  ];
+  if (draft.revisionProposal) {
+    lines.push(
+      "",
+      `**命题修订建议（待用户确认）：** ${draft.revisionProposal.statement.trim()}。理由：${draft.revisionProposal.reason.trim()}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatNewQuestions(questions: CheckpointNewQuestion[]): string {
+  if (questions.length === 0) return "本轮没有提出新问题。";
+  return questions.map((item) => [
+    `### ${item.id}　${item.question}`,
+    "",
+    `* **为什么出现：** ${item.why_it_arose}`,
+    `* **建议实验：** ${item.proposed_experiment}`,
+    `* **事先预期：** ${item.predictions.map((prediction) => `若${prediction.observation}，则${prediction.implication}`).join("；")}`,
+  ].join("\n")).join("\n\n");
+}
+
+function tableCell(value: string): string {
+  // TeX segments are protected before table parsing, so only pipes outside them need escaping.
+  return value.trim().replace(/\r?\n+/g, " ")
+    .split(/(\$\$[^]*?\$\$|\$[^$\n]+\$)/)
+    .map((part, index) => index % 2 === 1 ? part : part.replace(/\|/g, "\\|"))
+    .join("");
 }
 
 export function parseCheckpointMarkdown(markdown: string): {
@@ -237,14 +450,15 @@ export function parseCheckpointMarkdown(markdown: string): {
 export function validateCheckpointDraft(
   draft: CheckpointDraft,
   artifacts: PreparedCheckpointArtifact[],
+  predictionCount: number,
 ): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
   const bodies = [
-    ["研究目的", draft.purposeMarkdown],
-    ["实验设置", draft.setupMarkdown],
-    ["结果与分析", draft.resultsMarkdown],
-    ["结论与下一步", draft.conclusionMarkdown],
+    ["为什么做这个实验", draft.whyMarkdown],
+    ["实验设计", draft.designMarkdown],
+    ["实际观察", draft.observationsMarkdown],
+    ["对照预期的判断", draft.judgmentMarkdown],
   ] as const;
   if (!draft.title.trim()) errors.push("Checkpoint title 不能为空。");
   if (/\r|\n/.test(draft.title)) errors.push("Checkpoint title 必须保持为单行。");
@@ -264,8 +478,27 @@ export function validateCheckpointDraft(
     if (!body.trim()) errors.push(`${label}正文不能为空。`);
     if (/^#{1,2}\s+/m.test(body)) warnings.push(`${label}正文包含一级或二级标题；Viewer 会保留，但建议只使用三级以下小标题。`);
   }
-  if (!draft.shortConclusion.trim()) errors.push("shortConclusion 不能为空。");
-  if (/\r|\n/.test(draft.shortConclusion)) errors.push("shortConclusion 必须保持为单行。");
+  for (const [field, value] of [["answer", draft.answer], ["verdictReason", draft.verdictReason]] as const) {
+    if (!value.trim()) errors.push(`${field} 不能为空。`);
+    if (/\r|\n/.test(value)) errors.push(`${field} 必须保持为单行。`);
+  }
+  if (draft.predictionOutcomes.length !== predictionCount) {
+    errors.push(`predictionOutcomes 必须按顺序逐条对应进入实验时登记的 ${predictionCount} 条预期，当前为 ${draft.predictionOutcomes.length} 条。`);
+  }
+  draft.predictionOutcomes.forEach((outcome, index) => {
+    if (!outcome.note.trim()) errors.push(`预期 ${index + 1} 的判断依据不能为空。`);
+  });
+  draft.newQuestions.forEach((item, index) => {
+    if (![item.question, item.whyItArose, item.proposedExperiment].every((value) => value.trim())) {
+      errors.push(`新问题 ${index + 1} 的 question、whyItArose 和 proposedExperiment 不能为空。`);
+    }
+    if (item.predictions.some((prediction) => !prediction.observation.trim() || !prediction.implication.trim())) {
+      errors.push(`新问题 ${index + 1} 的预期必须同时写明观察和含义。`);
+    }
+  });
+  if (draft.revisionProposal && (!draft.revisionProposal.statement.trim() || !draft.revisionProposal.reason.trim())) {
+    errors.push("命题修订建议必须同时包含修订后的 statement 和 reason。");
+  }
   const reproductionFields = [
     ["model", draft.reproduction.model],
     ["modelRevision", draft.reproduction.modelRevision],
@@ -273,6 +506,17 @@ export function validateCheckpointDraft(
     ["dataRevision", draft.reproduction.dataRevision],
     ["codeCommit", draft.reproduction.codeCommit],
   ] as const;
+  if (![draft.dataset.name, draft.dataset.reason, draft.dataset.description].every((value) => value.trim())) {
+    errors.push("dataset 的 name、reason 和 description 不能为空；合成数据请描述生成过程。");
+  }
+  if (draft.keyHyperparameters.length === 0) {
+    errors.push("keyHyperparameters 至少需要一项会影响结论的参数。");
+  }
+  draft.keyHyperparameters.forEach((item, index) => {
+    if (![item.name, item.value, item.reason].every((value) => value.trim())) {
+      errors.push(`关键超参数 ${index + 1} 的 name、value 和 reason 不能为空。`);
+    }
+  });
   reproductionFields.forEach(([field, value]) => {
     if (!value.trim()) errors.push(`复现信息 ${field} 不能为空；不适用时请填写 not-applicable。`);
   });
@@ -301,18 +545,18 @@ export function validateCheckpointDraft(
   draft.reproduction.parameters.forEach((parameter) => {
     if (!parameter.name.trim() || !parameter.value.trim()) errors.push("复现参数 name 和 value 不能为空。");
   });
-  validateCheckpointCharts(draft.resultsMarkdown, errors, warnings);
-  validateVisualNarrative(draft.resultsMarkdown, errors);
+  validateCheckpointCharts(draft.observationsMarkdown, errors, warnings);
+  validateVisualNarrative(draft.observationsMarkdown, errors);
   const artifactPaths = new Set<string>();
   for (const item of artifacts) {
     if (!item.title.trim() || !item.description.trim()) errors.push(`Artifact ${item.artifact.path} 的 title 和 description 不能为空。`);
     if (artifactPaths.has(item.artifact.path)) errors.push(`Artifact 重复登记：${item.artifact.path}。`);
     artifactPaths.add(item.artifact.path);
     if (item.role !== "evidence" || !isImage(item.artifact.extension)) continue;
-    const referenced = referencesMarkdownImage(draft.resultsMarkdown, item.path)
-      || referencesMarkdownImage(draft.resultsMarkdown, item.artifact.path);
+    const referenced = referencesMarkdownImage(draft.observationsMarkdown, item.path)
+      || referencesMarkdownImage(draft.observationsMarkdown, item.artifact.path);
     if (!referenced) {
-      errors.push(`重要图片 ${item.artifact.path} 必须直接引用在 resultsMarkdown 中，而不能只作为附件。`);
+      errors.push(`重要图片 ${item.artifact.path} 必须直接引用在 observationsMarkdown 中，而不能只作为附件。`);
     }
   }
   return { errors, warnings };
@@ -591,14 +835,14 @@ async function reserveDirectory(root: string, baseId: string): Promise<{ id: str
   throw new Error("无法为 checkpoint 分配唯一目录。");
 }
 
-async function collectMarkdownFiles(root: string, depth: number): Promise<string[]> {
+async function collectMarkdownFiles(root: string, depth: number, excluded: Set<string>): Promise<string[]> {
   if (depth < 0) return [];
   const entries = await readdir(root, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
     const path = resolve(root, entry.name);
     if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) files.push(path);
-    else if (entry.isDirectory()) files.push(...await collectMarkdownFiles(path, depth - 1));
+    else if (entry.isDirectory() && !excluded.has(path)) files.push(...await collectMarkdownFiles(path, depth - 1, excluded));
   }
   return files;
 }

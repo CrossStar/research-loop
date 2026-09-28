@@ -2,9 +2,20 @@ export type WorkMode = "brainstorming" | "exploration" | "experiment";
 
 export type ExperimentIntent = "reproduction" | "diagnostic" | "exploratory" | "ablation";
 
+/** A prediction registered before the experiment runs; copied verbatim into the checkpoint. */
+export interface ExperimentPrediction {
+  observation: string;
+  implication: string;
+}
+
 export interface ExperimentContext {
   title: string;
+  /** Proposition and question this experiment answers. Required for new experiments. */
+  propositionId?: string;
+  questionId?: string;
   question: string;
+  rationale?: string;
+  predictions?: ExperimentPrediction[];
   intent: ExperimentIntent;
   plannedDataScope: string;
   reference?: string;
@@ -29,6 +40,8 @@ export interface ArtifactMetadata {
 export interface ResearchState {
   enabled: boolean;
   workMode: WorkMode;
+  /** Active proposition; lives in checkpoints/propositions and survives experiment boundaries. */
+  propositionId?: string;
   objective?: string;
   experiment?: ExperimentContext;
   /** Small, durable paths used to rediscover artifacts; safe to persist in session entries. */

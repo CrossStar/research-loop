@@ -13,13 +13,13 @@ import { renderPiResearchStatus } from "./pi-status.js";
 export const STATE_ENTRY = "research-loop-state";
 export const POLICY_MESSAGE = "research-loop-policy";
 
-const RESEARCH_TOOLS = ["research_mode", "research_checkpoint", "research_abort_experiment"];
+const RESEARCH_TOOLS = ["research_mode", "research_proposition", "research_checkpoint", "research_abort_experiment"];
 const ASK_USER_QUESTION_TOOL = "ask_user_question";
 const STRUCTURED_DECISION_GUIDANCE = [
   "[RESEARCH DECISIONS]",
   "ask_user_question is available. Use it once, grouping related questions, when research cannot proceed without a concrete user decision.",
   "Use it for scientifically material protocol or scope choices, cost/scope trade-offs between alternatives, and branches between genuinely different next experiments.",
-  "Before a checkpoint, ask only when the user must choose the next branch; incorporate the answer into the checkpoint. Do not ask about routine, reversible choices or repeat an answered question.",
+  "Do not ask the user to choose the next question before a checkpoint: list the questions the result raised in research_checkpoint newQuestions, and Research Loop presents them to the user. Do not ask about routine, reversible choices or repeat an answered question.",
   "Governor approval dialogs authorize one exact action. If the user declines, stop and do not retry that action.",
 ].join("\n");
 
@@ -37,6 +37,7 @@ const PI_EXPERIMENT_CODE_GUIDANCE = [
   "Separate model loading, data preparation, conditions, analysis, and plotting only when they are naturally distinct. Avoid factories, registries, strategy/context hierarchies, tiny wrapper chains, and reusable frameworks until multiple real experiments need them.",
   "Avoid broad defensive layers, retries, compatibility shims, silent recovery, repeated existence checks, and large try/except shells. Add only checks that prevent expensive wasted work or misleading results.",
   "Save scientific artifacts once under a stable predictable run directory and declare project-relative output directories in research_mode artifactRoots; Artifact Radar stays disabled when roots are omitted. Use names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
+  "For each main comparison the experiment is meant to answer, save one clearly labeled figure under the run's figures/ directory, with axis labels and units, a legend, and the compared conditions, so the checkpoint can show the evidence directly. Save the exact per-condition values as CSV alongside it.",
   "End the run with a compact Rich result table and a labeled list of exact saved paths so the researcher can judge the result and start the next iteration immediately.",
 ].join("\n");
 
@@ -58,8 +59,18 @@ export class ResearchRuntime {
   private readonly core = new ResearchCore();
   private readonly blockedToolAttempts = new Map<string, number>();
   private userDecisionPending = false;
+  private propositionContext?: string;
+  private nextQuestionId?: string;
 
   constructor(private readonly pi: ExtensionAPI) {}
+
+  get propositionId(): string | undefined {
+    return this.core.propositionId;
+  }
+
+  get selectedNextQuestionId(): string | undefined {
+    return this.nextQuestionId;
+  }
 
   get enabled(): boolean {
     return this.core.enabled;
@@ -88,6 +99,8 @@ export class ResearchRuntime {
   startSession(ctx: ExtensionContext): SessionRestoreResult {
     this.blockedToolAttempts.clear();
     this.userDecisionPending = false;
+    this.propositionContext = undefined;
+    this.nextQuestionId = undefined;
     const latest = findLatestResearchState(ctx);
     const embeddedArtifacts = Boolean(latest && Object.hasOwn(latest, "artifacts"));
     const legacyArtifacts = embeddedArtifacts && Array.isArray(latest?.artifacts)
@@ -109,6 +122,24 @@ export class ResearchRuntime {
     ctx.ui.notify(`Research Loop: ${enabled ? "ON" : "OFF"}`, "info");
   }
 
+  /** Activate a proposition; its summary is injected through setPropositionContext. */
+  setProposition(propositionId: string | undefined, ctx: ExtensionContext): void {
+    if (this.core.propositionId === propositionId) return;
+    this.core.setProposition(propositionId);
+    this.nextQuestionId = undefined;
+    this.persist();
+    this.renderStatus(ctx);
+  }
+
+  setPropositionContext(context: string | undefined): void {
+    this.propositionContext = context;
+  }
+
+  selectNextQuestion(questionId: string | undefined, ctx: ExtensionContext): void {
+    this.nextQuestionId = questionId;
+    this.renderStatus(ctx);
+  }
+
   enterMode(
     mode: WorkMode,
     objective: string,
@@ -117,6 +148,7 @@ export class ResearchRuntime {
   ): GateDecision {
     const decision = this.core.enterMode(mode, objective, experiment);
     if (decision.block) return decision;
+    if (mode === "experiment") this.nextQuestionId = undefined;
     this.blockedToolAttempts.clear();
     this.setToolAvailability();
     this.persist();
@@ -173,6 +205,7 @@ export class ResearchRuntime {
     const policy = this.core.policy();
     if (!policy) return undefined;
     const guidance = [policy];
+    if (this.propositionContext) guidance.push(this.propositionContext);
     if (this.core.workMode === "experiment") guidance.push(PI_EXPERIMENT_CODE_GUIDANCE);
     if (this.pi.getActiveTools().includes(ASK_USER_QUESTION_TOOL)) guidance.push(STRUCTURED_DECISION_GUIDANCE);
     return guidance.join("\n");
@@ -262,7 +295,7 @@ export class ResearchRuntime {
     ctx.ui.setWidget("research-loop-status", undefined);
     ctx.ui.setStatus(
       "research-loop",
-      renderPiResearchStatus(this.core.snapshot(false), ctx.ui.theme, this.userDecisionPending),
+      renderPiResearchStatus(this.core.snapshot(false), ctx.ui.theme, this.userDecisionPending, this.nextQuestionId),
     );
   }
 
@@ -285,6 +318,8 @@ export class ResearchRuntime {
     active.push("research_mode");
     if (this.core.workMode === "experiment") {
       active.push("research_checkpoint", "research_abort_experiment");
+    } else {
+      active.push("research_proposition");
     }
     this.pi.setActiveTools(active);
   }

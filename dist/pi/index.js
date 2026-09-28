@@ -1237,15 +1237,15 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { readFileSync as readFileSync2 } from "node:fs";
 import { realpath as realpath4, stat as stat5 } from "node:fs/promises";
-import { basename as basename4, extname as extname5, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
+import { basename as basename4, extname as extname5, relative as relative5, resolve as resolve6, sep as sep5 } from "node:path";
 import { Type } from "typebox";
 
 // src/checkpoint-server.ts
 import { createReadStream as createReadStream2 } from "node:fs";
-import { open as open2, readFile as readFile2, realpath as realpath2, stat as stat3 } from "node:fs/promises";
+import { open as open2, readFile as readFile4, realpath as realpath3, stat as stat4 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { hostname } from "node:os";
-import { extname as extname3, relative as relative3, resolve as resolve3, sep as sep3 } from "node:path";
+import { extname as extname4, relative as relative4, resolve as resolve5, sep as sep4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/marked/lib/marked.esm.js
@@ -2499,507 +2499,335 @@ var on = f.parseInline;
 var ln = b.parse;
 var pn = x.lex;
 
-// src/checkpoint-server.ts
-var DEFAULT_HOST = "127.0.0.1";
-var ALL_INTERFACES_HOST = "0.0.0.0";
-var DEFAULT_BASE_PORT = 43119;
-var MAX_PORT_ATTEMPTS = 100;
-var MAX_JSON_PREVIEW_BYTES = 32 * 1024 * 1024;
-var MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
-var CheckpointViewerServer = class {
-  constructor(store, options = {}) {
-    this.store = store;
-    this.host = options.host ?? envHost();
-    this.basePort = normalizeBasePort(options.basePort ?? envBasePort());
-    this.templateOverride = options.template;
-    this.templatePath = options.templatePath ?? fileURLToPath(new URL("./checkpoint-report-template.html", import.meta.url));
-  }
-  host;
-  basePort;
-  templateOverride;
-  templatePath;
-  server;
-  port;
-  startPromise;
-  get origin() {
-    if (this.port === void 0) return void 0;
-    const accessHost = this.host === ALL_INTERFACES_HOST ? hostname() : this.host;
-    return `http://${accessHost}:${this.port}`;
-  }
-  get exposedToNetwork() {
-    return this.host === ALL_INTERFACES_HOST;
-  }
-  get latestUrl() {
-    return this.origin ? `${this.origin}/latest` : void 0;
-  }
-  async start() {
-    if (this.server?.listening) return;
-    if (this.startPromise) return this.startPromise;
-    this.startPromise = this.startListening();
-    try {
-      await this.startPromise;
-    } finally {
-      this.startPromise = void 0;
-    }
-  }
-  async stop() {
-    await this.startPromise?.catch(() => void 0);
-    const server = this.server;
-    this.server = void 0;
-    this.port = void 0;
-    if (!server?.listening) return;
-    await new Promise((resolveClose) => server.close(() => resolveClose()));
-  }
-  async startListening() {
-    const template = this.templateOverride ?? await readFile2(this.templatePath, "utf8");
-    if (!template.includes("checkpoint-viewer")) {
-      throw new Error("Checkpoint Viewer template is missing its viewer root marker.");
-    }
-    let lastError;
-    for (let offset = 0; offset < MAX_PORT_ATTEMPTS; offset += 1) {
-      const port = this.basePort + offset;
-      if (port > 65535) break;
-      const server2 = this.createHttpServer(template);
-      try {
-        await listen(server2, port, this.host);
-        server2.unref();
-        this.server = server2;
-        this.port = port;
-        return;
-      } catch (error) {
-        lastError = error;
-        server2.close();
-        const code = error.code;
-        if (code !== "EADDRINUSE" && code !== "EACCES") throw error;
-      }
-    }
-    const server = this.createHttpServer(template);
-    try {
-      await listen(server, 0, this.host);
-      server.unref();
-      this.server = server;
-      this.port = server.address().port;
-    } catch (error) {
-      server.close();
-      throw new Error(`Could not bind the Checkpoint Viewer to ${this.host}.`, { cause: lastError ?? error });
-    }
-  }
-  createHttpServer(template) {
-    return createServer((request, response) => {
-      void this.handleRequest(template, request, response).catch((error) => {
-        if (response.headersSent) response.destroy(error);
-        else send(response, 500, "text/plain; charset=utf-8", `Checkpoint Viewer error: ${String(error)}`);
-      });
-    });
-  }
-  async handleRequest(template, request, response) {
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      send(response, 405, "text/plain; charset=utf-8", "Method not allowed", request.method === "HEAD");
-      return;
-    }
-    const url = new URL(request.url ?? "/", `http://${DEFAULT_HOST}`);
-    if (url.pathname === "/health") {
-      send(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true }), request.method === "HEAD");
-      return;
-    }
-    if (url.pathname === "/" || url.pathname === "/latest" || /^\/checkpoints\/[^/]+$/.test(url.pathname)) {
-      sendHtml(response, template, request.method === "HEAD");
-      return;
-    }
-    if (url.pathname === "/api/checkpoints") {
-      const checkpoints = await this.store.list();
-      sendJson(response, 200, checkpoints.map((item) => historyEntry(item)), request.method === "HEAD");
-      return;
-    }
-    if (url.pathname === "/api/latest") {
-      const checkpoint = await this.store.latest();
-      if (!checkpoint) {
-        sendJson(response, 404, { error: "No checkpoints found." }, request.method === "HEAD");
-        return;
-      }
-      sendJson(response, 200, renderCheckpoint(this.store, checkpoint), request.method === "HEAD");
-      return;
-    }
-    const checkpointMatch = url.pathname.match(/^\/api\/checkpoints\/([^/]+)$/);
-    if (checkpointMatch) {
-      let id;
-      try {
-        id = decodeURIComponent(checkpointMatch[1]);
-      } catch {
-        sendJson(response, 400, { error: "Malformed checkpoint id." }, request.method === "HEAD");
-        return;
-      }
-      const checkpoint = await this.store.find(id);
-      if (!checkpoint) {
-        sendJson(response, 404, { error: "Checkpoint not found." }, request.method === "HEAD");
-        return;
-      }
-      sendJson(response, 200, renderCheckpoint(this.store, checkpoint), request.method === "HEAD");
-      return;
-    }
-    if (url.pathname.startsWith("/api/artifacts/")) {
-      await this.serveArtifactPreview(url.pathname.slice("/api/artifacts/".length), response, request.method === "HEAD");
-      return;
-    }
-    if (url.pathname.startsWith("/artifacts/")) {
-      await this.serveArtifact(url.pathname.slice("/artifacts/".length), response, request.method === "HEAD");
-      return;
-    }
-    send(response, 404, "text/plain; charset=utf-8", "Not found", request.method === "HEAD");
-  }
-  async serveArtifact(encodedPath, response, headOnly) {
-    const resolved = await resolveArtifactPath(this.store.projectRoot, encodedPath);
-    if (resolved.status === "forbidden") {
-      send(response, 403, "text/plain; charset=utf-8", "Artifact path is outside the project.", headOnly);
-      return;
-    }
-    if (resolved.status === "missing") {
-      send(response, 404, "text/plain; charset=utf-8", "Artifact not found.", headOnly);
-      return;
-    }
-    const path = resolved.path;
-    let fileStat;
-    try {
-      fileStat = await stat3(path);
-    } catch {
-      send(response, 404, "text/plain; charset=utf-8", "Artifact not found.", headOnly);
-      return;
-    }
-    if (!fileStat.isFile()) {
-      send(response, 404, "text/plain; charset=utf-8", "Artifact is not a file.", headOnly);
-      return;
-    }
-    response.writeHead(200, {
-      "Content-Type": mimeType(extname3(path)),
-      "Content-Length": fileStat.size,
-      "Cache-Control": "no-cache",
-      "Content-Security-Policy": "default-src 'none'; sandbox",
-      "Cross-Origin-Resource-Policy": "same-origin",
-      "X-Content-Type-Options": "nosniff"
-    });
-    if (headOnly) response.end();
-    else createReadStream2(path).pipe(response);
-  }
-  async serveArtifactPreview(encodedPath, response, headOnly) {
-    const resolved = await resolveArtifactPath(this.store.projectRoot, encodedPath);
-    if (resolved.status === "forbidden") {
-      sendJson(response, 403, { error: "Artifact path is outside the project." }, headOnly);
-      return;
-    }
-    if (resolved.status === "missing") {
-      sendJson(response, 404, { error: "Artifact not found." }, headOnly);
-      return;
-    }
-    const path = resolved.path;
-    let fileStat;
-    try {
-      fileStat = await stat3(path);
-    } catch {
-      sendJson(response, 404, { error: "Artifact not found." }, headOnly);
-      return;
-    }
-    if (!fileStat.isFile()) {
-      sendJson(response, 404, { error: "Artifact is not a file." }, headOnly);
-      return;
-    }
-    const extension = extname3(path).toLowerCase();
-    if (extension !== ".json" && extension !== ".csv") {
-      sendJson(response, 415, { error: "Preview supports JSON and CSV only." }, headOnly);
-      return;
-    }
-    const limit = extension === ".json" ? MAX_JSON_PREVIEW_BYTES : MAX_TEXT_PREVIEW_BYTES;
-    const truncated = fileStat.size > limit;
-    const handle = await open2(path, "r");
-    try {
-      const buffer = Buffer.alloc(Math.min(fileStat.size, limit));
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      sendJson(response, 200, {
-        kind: extension.slice(1),
-        size: fileStat.size,
-        truncated,
-        text: buffer.toString("utf8", 0, bytesRead)
-      }, headOnly);
-    } finally {
-      await handle.close();
-    }
-  }
+// src/latex-text.ts
+var SYMBOLS = {
+  alpha: "\u03B1",
+  beta: "\u03B2",
+  gamma: "\u03B3",
+  delta: "\u03B4",
+  epsilon: "\u03B5",
+  varepsilon: "\u03B5",
+  zeta: "\u03B6",
+  eta: "\u03B7",
+  theta: "\u03B8",
+  vartheta: "\u03D1",
+  iota: "\u03B9",
+  kappa: "\u03BA",
+  lambda: "\u03BB",
+  mu: "\u03BC",
+  nu: "\u03BD",
+  xi: "\u03BE",
+  pi: "\u03C0",
+  rho: "\u03C1",
+  sigma: "\u03C3",
+  tau: "\u03C4",
+  upsilon: "\u03C5",
+  phi: "\u03C6",
+  varphi: "\u03C6",
+  chi: "\u03C7",
+  psi: "\u03C8",
+  omega: "\u03C9",
+  Gamma: "\u0393",
+  Delta: "\u0394",
+  Theta: "\u0398",
+  Lambda: "\u039B",
+  Xi: "\u039E",
+  Pi: "\u03A0",
+  Sigma: "\u03A3",
+  Phi: "\u03A6",
+  Psi: "\u03A8",
+  Omega: "\u03A9",
+  approx: "\u2248",
+  sim: "\u223C",
+  simeq: "\u2243",
+  cong: "\u2245",
+  equiv: "\u2261",
+  neq: "\u2260",
+  ne: "\u2260",
+  le: "\u2264",
+  leq: "\u2264",
+  ge: "\u2265",
+  geq: "\u2265",
+  ll: "\u226A",
+  gg: "\u226B",
+  times: "\xD7",
+  cdot: "\xB7",
+  pm: "\xB1",
+  mp: "\u2213",
+  div: "\xF7",
+  infty: "\u221E",
+  propto: "\u221D",
+  sum: "\u2211",
+  prod: "\u220F",
+  int: "\u222B",
+  partial: "\u2202",
+  nabla: "\u2207",
+  in: "\u2208",
+  notin: "\u2209",
+  subset: "\u2282",
+  subseteq: "\u2286",
+  cup: "\u222A",
+  cap: "\u2229",
+  forall: "\u2200",
+  exists: "\u2203",
+  neg: "\xAC",
+  land: "\u2227",
+  lor: "\u2228",
+  to: "\u2192",
+  rightarrow: "\u2192",
+  leftarrow: "\u2190",
+  Rightarrow: "\u21D2",
+  implies: "\u21D2",
+  iff: "\u21D4",
+  mapsto: "\u21A6",
+  lvert: "|",
+  rvert: "|",
+  vert: "|",
+  mid: "|",
+  lVert: "\u2016",
+  rVert: "\u2016",
+  Vert: "\u2016",
+  langle: "\u27E8",
+  rangle: "\u27E9",
+  ldots: "\u2026",
+  cdots: "\u22EF",
+  dots: "\u2026",
+  circ: "\u2218",
+  star: "\u22C6",
+  ast: "\u2217",
+  top: "\u22A4",
+  perp: "\u22A5",
+  emptyset: "\u2205",
+  quad: " ",
+  qquad: "  ",
+  ",": " ",
+  ":": " ",
+  ";": " ",
+  "!": "",
+  " ": " "
 };
-function formatSshPortForwardCommand(reportUrl, sshHost = process.env.RESEARCH_LOOP_SSH_HOST?.trim() || hostname()) {
-  const port = new URL(reportUrl).port;
-  if (!port) throw new Error(`Checkpoint Viewer URL has no port: ${reportUrl}`);
-  return `ssh -N -o RemoteCommand=none -o RequestTTY=no -L ${port}:127.0.0.1:${port} ${sshHost}`;
+var BLACKBOARD = { R: "\u211D", N: "\u2115", Z: "\u2124", Q: "\u211A", C: "\u2102", E: "\u{1D53C}", P: "\u2119" };
+var ACCENTS = { hat: "\u0302", widehat: "\u0302", bar: "\u0304", overline: "\u0304", tilde: "\u0303", widetilde: "\u0303", vec: "\u20D7", dot: "\u0307" };
+var TEXT_WRAPPERS = /* @__PURE__ */ new Set(["text", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathcal", "boldsymbol", "operatorname", "textbf", "textit"]);
+var SIZING = /* @__PURE__ */ new Set(["left", "right", "big", "Big", "bigg", "Bigg", "displaystyle", "textstyle"]);
+var SUPERSCRIPT = {
+  "0": "\u2070",
+  "1": "\xB9",
+  "2": "\xB2",
+  "3": "\xB3",
+  "4": "\u2074",
+  "5": "\u2075",
+  "6": "\u2076",
+  "7": "\u2077",
+  "8": "\u2078",
+  "9": "\u2079",
+  "+": "\u207A",
+  "-": "\u207B",
+  "=": "\u207C",
+  "(": "\u207D",
+  ")": "\u207E",
+  n: "\u207F",
+  i: "\u2071",
+  T: "\u1D40",
+  "\u22A4": "\u1D40",
+  "*": "*",
+  "\u2032": "\u2032"
+};
+var SUBSCRIPT = {
+  "0": "\u2080",
+  "1": "\u2081",
+  "2": "\u2082",
+  "3": "\u2083",
+  "4": "\u2084",
+  "5": "\u2085",
+  "6": "\u2086",
+  "7": "\u2087",
+  "8": "\u2088",
+  "9": "\u2089",
+  "+": "\u208A",
+  "-": "\u208B",
+  "=": "\u208C",
+  "(": "\u208D",
+  ")": "\u208E",
+  a: "\u2090",
+  e: "\u2091",
+  o: "\u2092",
+  x: "\u2093",
+  h: "\u2095",
+  k: "\u2096",
+  l: "\u2097",
+  m: "\u2098",
+  n: "\u2099",
+  p: "\u209A",
+  s: "\u209B",
+  t: "\u209C",
+  i: "\u1D62",
+  j: "\u2C7C",
+  r: "\u1D63",
+  u: "\u1D64",
+  v: "\u1D65"
+};
+function latexToUnicode(text) {
+  return text.replace(/\$\$([^]*?)\$\$/g, (_match, tex) => convertTex(tex)).replace(/\\\[([^]*?)\\\]/g, (_match, tex) => convertTex(tex)).replace(/\\\(([^]*?)\\\)/g, (_match, tex) => convertTex(tex)).replace(/(^|[^\\$])\$(?!\$|\s)([^$\n]*?\S)\$(?!\d|\$)/g, (_match, prefix, tex) => `${prefix}${convertTex(tex)}`);
 }
-function renderCheckpoint(store, checkpoint) {
-  const { html, toc } = renderMarkdown(store, checkpoint);
-  return {
-    metadata: checkpoint.metadata,
-    markdown_path: checkpoint.relativeMarkdownPath,
-    html,
-    toc
-  };
-}
-function renderMarkdown(store, checkpoint) {
-  const protectedMath = protectMathSegments(checkpoint.markdown);
-  const toc = [];
-  const usedIds = /* @__PURE__ */ new Map();
-  const renderer = new P();
-  renderer.html = ({ text }) => `<pre class="raw-html">${escapeHtml(text)}</pre>`;
-  renderer.heading = function({ tokens, depth }) {
-    const content = this.parser.parseInline(tokens);
-    const plain = stripHtml(protectedMath.restore(content));
-    const base = headingSlug(plain) || "section";
-    const count2 = (usedIds.get(base) ?? 0) + 1;
-    usedIds.set(base, count2);
-    const id = count2 === 1 ? base : `${base}-${count2}`;
-    if (depth >= 2 && depth <= 3) toc.push({ id, text: plain, depth });
-    const className = depth === 3 && /^表\s*[0-9一二三四五六七八九十百]+[\s　.:：、—-]/.test(plain) ? ' class="table-title"' : "";
-    return `<h${depth} id="${escapeAttribute(id)}"${className}>${content}</h${depth}>
-`;
-  };
-  const defaultCode = renderer.code.bind(renderer);
-  renderer.code = (token) => {
-    if ((token.lang ?? "").trim().toLowerCase() !== "checkpoint-chart") return defaultCode(token);
-    try {
-      const config = JSON.parse(token.text);
-      const encoded = Buffer.from(JSON.stringify(config), "utf8").toString("base64url");
-      return `<figure class="checkpoint-chart" data-chart="${encoded}"></figure>
-`;
-    } catch {
-      return `<pre class="chart-error"><code>${escapeHtml(token.text)}</code></pre>
-`;
+function convertTex(tex) {
+  let output = "";
+  let index = 0;
+  while (index < tex.length) {
+    const char = tex[index];
+    if (char === "\\") {
+      const { name, end } = readCommand(tex, index);
+      index = end;
+      if (name === "frac" || name === "dfrac" || name === "tfrac") {
+        const numerator = readArgument(tex, index);
+        const denominator = readArgument(tex, numerator.end);
+        index = denominator.end;
+        output += `${wrapCompound(numerator.value)}/${wrapCompound(denominator.value)}`;
+      } else if (name === "sqrt") {
+        const argument = readArgument(tex, index);
+        index = argument.end;
+        output += `\u221A${wrapCompound(argument.value)}`;
+      } else if (ACCENTS[name]) {
+        const argument = readArgument(tex, index);
+        index = argument.end;
+        output += `${argument.value}${ACCENTS[name]}`;
+      } else if (name === "mathbb") {
+        const argument = readArgument(tex, index);
+        index = argument.end;
+        output += [...argument.value].map((letter) => BLACKBOARD[letter] ?? letter).join("");
+      } else if (TEXT_WRAPPERS.has(name)) {
+        const argument = readArgument(tex, index, true);
+        index = argument.end;
+        output += argument.value;
+      } else if (!SIZING.has(name)) {
+        output += SYMBOLS[name] ?? (name.length === 1 ? name : name);
+      }
+      continue;
     }
-  };
-  renderer.paragraph = function({ tokens }) {
-    const content = this.parser.parseInline(tokens);
-    return tokens.length === 1 && tokens[0]?.type === "image" ? `${content}
-` : `<p>${content}</p>
-`;
-  };
-  renderer.image = ({ href, title, text }) => {
-    const target = markdownTarget(store, checkpoint, href);
-    if (!target) return `<span class="broken-artifact">[\u65E0\u6CD5\u8BBF\u95EE\u56FE\u7247\uFF1A${escapeHtml(text)}]</span>`;
-    const caption = title || text;
-    return `<figure class="checkpoint-figure"><img src="${escapeAttribute(target.url)}" alt="${escapeAttribute(text)}" loading="lazy"><figcaption>${escapeHtml(caption)}</figcaption></figure>`;
-  };
-  renderer.link = function({ href, title, tokens }) {
-    const label = this.parser.parseInline(tokens);
-    const target = markdownTarget(store, checkpoint, href);
-    if (!target) return `<span class="broken-artifact">${label}</span>`;
-    const titleAttribute = title ? ` title="${escapeAttribute(title)}"` : "";
-    const preview2 = target.previewKind ? ` data-preview-kind="${target.previewKind}" data-preview-url="${escapeAttribute(target.previewUrl)}"` : "";
-    const external = target.external ? ' target="_blank" rel="noreferrer"' : "";
-    return `<a href="${escapeAttribute(target.url)}"${titleAttribute}${preview2}${external}>${label}</a>`;
-  };
-  const marked = new Z({ gfm: true, breaks: false, renderer });
-  const rendered = String(marked.parse(protectedMath.markdown));
-  return { html: protectedMath.restore(rendered), toc };
-}
-function protectMathSegments(markdown) {
-  let marker = "RESEARCHLOOPMATHSEGMENT";
-  while (markdown.includes(marker)) marker += "X";
-  const codeSegments = [];
-  const mathSegments = [];
-  const stashCode = (value) => {
-    const token = `${marker}CODE${codeSegments.length}END`;
-    codeSegments.push(value);
-    return token;
-  };
-  let protectedMarkdown = markdown.replace(/(```|~~~)[^]*?\1/g, stashCode).replace(/(`+)[^]*?\1/g, stashCode);
-  const stashMath = (content, display) => {
-    const token = `${marker}${mathSegments.length}END`;
-    mathSegments.push({ content, display });
-    return token;
-  };
-  protectedMarkdown = protectedMarkdown.replace(/\$\$([^]*?)\$\$/g, (_match, content) => stashMath(content, true)).replace(/\\\[([^]*?)\\\]/g, (_match, content) => stashMath(content, true)).replace(/\\\(([^]*?)\\\)/g, (_match, content) => stashMath(content, false)).replace(/(^|[^\\$])\$(?!\$|\s)([^$\n]*?\S)\$(?!\d|\$)/g, (_match, prefix, content) => {
-    return `${prefix}${stashMath(content, false)}`;
-  });
-  codeSegments.forEach((segment, index) => {
-    protectedMarkdown = protectedMarkdown.replace(`${marker}CODE${index}END`, () => segment);
-  });
-  return {
-    markdown: protectedMarkdown,
-    restore(html) {
-      let restored = html;
-      mathSegments.forEach((segment, index) => {
-        const delimiter = segment.display ? `\\[${escapeHtml(segment.content)}\\]` : `\\(${escapeHtml(segment.content)}\\)`;
-        restored = restored.replaceAll(`${marker}${index}END`, () => delimiter);
-      });
-      return restored;
+    if (char === "^" || char === "_") {
+      const argument = readArgument(tex, index + 1);
+      index = argument.end;
+      output += script(argument.value, char === "^" ? SUPERSCRIPT : SUBSCRIPT, char);
+      continue;
     }
-  };
-}
-function markdownTarget(store, checkpoint, href) {
-  if (/^(?:https?:|mailto:)/i.test(href)) return { url: href, external: true };
-  if (href.startsWith("#")) return { url: href, external: false };
-  if (/^[a-z][a-z\d+.-]*:/i.test(href)) return void 0;
-  let decoded;
-  try {
-    decoded = decodeURIComponent(href.split(/[?#]/, 1)[0]);
-  } catch {
-    return void 0;
+    if (char === "{") {
+      const argument = readArgument(tex, index);
+      index = argument.end;
+      output += argument.value;
+      continue;
+    }
+    if (char === "}") {
+      index += 1;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (output && !output.endsWith(" ")) output += " ";
+      while (index < tex.length && /\s/.test(tex[index])) index += 1;
+      continue;
+    }
+    output += char;
+    index += 1;
   }
-  const absolute = resolve3(checkpoint.directory, decoded);
-  if (!isInside(store.projectRoot, absolute)) return void 0;
-  const projectPath = toPosix(relative3(store.projectRoot, absolute));
-  const encoded = encodeProjectPath(projectPath);
-  const extension = extname3(absolute).toLowerCase();
-  const previewKind = extension === ".json" ? "json" : extension === ".csv" ? "csv" : void 0;
-  return {
-    url: `/artifacts/${encoded}`,
-    external: false,
-    previewKind,
-    previewUrl: previewKind ? `/api/artifacts/${encoded}` : void 0
-  };
+  return output.trim();
 }
-function historyEntry(checkpoint) {
-  return {
-    ...checkpoint.metadata,
-    markdown_path: checkpoint.relativeMarkdownPath,
-    url: `/checkpoints/${encodeURIComponent(checkpoint.metadata.id)}`
-  };
+function readCommand(tex, start) {
+  const letters = tex.slice(start + 1).match(/^[A-Za-z]+/)?.[0];
+  if (letters) return { name: letters, end: start + 1 + letters.length };
+  return { name: tex[start + 1] ?? "", end: Math.min(tex.length, start + 2) };
 }
-async function resolveArtifactPath(projectRoot, encodedPath) {
-  let decoded;
-  try {
-    decoded = encodedPath.split("/").map((part) => decodeURIComponent(part)).join("/");
-  } catch {
-    return { status: "forbidden" };
+function readArgument(tex, start, raw = false) {
+  let index = start;
+  while (index < tex.length && /\s/.test(tex[index])) index += 1;
+  if (tex[index] === "{") {
+    let depth = 0;
+    for (let end = index; end < tex.length; end += 1) {
+      if (tex[end] === "\\") {
+        end += 1;
+        continue;
+      }
+      if (tex[end] === "{") depth += 1;
+      if (tex[end] === "}") depth -= 1;
+      if (depth === 0) {
+        const inner2 = tex.slice(index + 1, end);
+        return { value: raw ? inner2 : convertTex(inner2), end: end + 1 };
+      }
+    }
+    const inner = tex.slice(index + 1);
+    return { value: raw ? inner : convertTex(inner), end: tex.length };
   }
-  const lexicalPath = resolve3(projectRoot, decoded);
-  if (!isInside(projectRoot, lexicalPath)) return { status: "forbidden" };
-  try {
-    const [realProjectRoot, realArtifactPath] = await Promise.all([realpath2(projectRoot), realpath2(lexicalPath)]);
-    return isInside(realProjectRoot, realArtifactPath) ? { status: "ok", path: realArtifactPath } : { status: "forbidden" };
-  } catch {
-    return { status: "missing" };
+  if (tex[index] === "\\") {
+    const { end } = readCommand(tex, index);
+    return { value: convertTex(tex.slice(index, end)), end };
   }
+  return { value: tex[index] ?? "", end: Math.min(tex.length, index + 1) };
 }
-function encodeProjectPath(path) {
-  return path.split("/").map((part) => encodeURIComponent(part)).join("/");
+function script(value, table, marker) {
+  const chars = [...value];
+  if (chars.length > 0 && chars.every((char) => table[char])) return chars.map((char) => table[char]).join("");
+  return chars.length === 1 ? `${marker}${value}` : `${marker}(${value})`;
 }
-function headingSlug(value) {
-  return value.normalize("NFKC").toLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 80);
-}
-function stripHtml(value) {
-  return value.replace(/<[^>]*>/g, "").replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => ({
-    "&amp;": "&",
-    "&lt;": "<",
-    "&gt;": ">",
-    "&quot;": '"',
-    "&#39;": "'"
-  })[entity] ?? entity).trim();
-}
-function escapeHtml(value) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-}
-function escapeAttribute(value) {
-  return escapeHtml(value);
-}
-function isInside(root, path) {
-  const normalizedRoot = resolve3(root);
-  const normalizedPath = resolve3(path);
-  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${sep3}`);
-}
-function toPosix(path) {
-  return path.split(sep3).join("/");
-}
-function mimeType(extension) {
-  return {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".svg": "image/svg+xml",
-    ".json": "application/json; charset=utf-8",
-    ".csv": "text/csv; charset=utf-8",
-    ".md": "text/markdown; charset=utf-8",
-    ".txt": "text/plain; charset=utf-8",
-    ".log": "text/plain; charset=utf-8",
-    ".out": "text/plain; charset=utf-8",
-    ".yaml": "text/yaml; charset=utf-8",
-    ".yml": "text/yaml; charset=utf-8",
-    ".jsonl": "application/x-ndjson; charset=utf-8",
-    ".pdf": "application/pdf"
-  }[extension.toLowerCase()] ?? "application/octet-stream";
-}
-function envHost() {
-  const configured = process.env.RESEARCH_LOOP_CHECKPOINT_HOST?.trim() || DEFAULT_HOST;
-  if (configured === DEFAULT_HOST || configured === ALL_INTERFACES_HOST) return configured;
-  throw new Error(`RESEARCH_LOOP_CHECKPOINT_HOST must be ${DEFAULT_HOST} or ${ALL_INTERFACES_HOST}: ${configured}`);
-}
-function envBasePort() {
-  const configured = Number.parseInt(process.env.RESEARCH_LOOP_CHECKPOINT_PORT ?? "", 10);
-  return Number.isInteger(configured) ? configured : DEFAULT_BASE_PORT;
-}
-function normalizeBasePort(value) {
-  return Number.isInteger(value) && value >= 1024 && value <= 65535 ? value : DEFAULT_BASE_PORT;
-}
-function listen(server, port, host) {
-  return new Promise((resolveListen, reject) => {
-    const onError = (error) => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolveListen();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, host);
-  });
-}
-function sendHtml(response, body, headOnly) {
-  response.writeHead(200, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store, max-age=0",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer"
-  });
-  response.end(headOnly ? void 0 : body);
-}
-function sendJson(response, status, value, headOnly) {
-  send(response, status, "application/json; charset=utf-8", JSON.stringify(value), headOnly);
-}
-function send(response, status, contentType, body, headOnly = false) {
-  response.writeHead(status, {
-    "Content-Type": contentType,
-    "Cache-Control": "no-store, max-age=0",
-    "X-Content-Type-Options": "nosniff"
-  });
-  response.end(headOnly ? void 0 : body);
+function wrapCompound(value) {
+  return /^[\p{Letter}\p{Number}.′̂̄̃⃗̇]+$/u.test(value) ? value : `(${value})`;
 }
 
+// src/proposition-store.ts
+import { mkdir as mkdir2, readFile as readFile3, readdir as readdir2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import { resolve as resolve4 } from "node:path";
+
 // src/checkpoint-store.ts
-import { mkdir, readFile as readFile3, readdir, realpath as realpath3, rename, rm, stat as stat4, writeFile } from "node:fs/promises";
-import { basename as basename3, dirname as dirname2, isAbsolute as isAbsolute2, relative as relative4, resolve as resolve4, sep as sep4 } from "node:path";
+import { mkdir, readFile as readFile2, readdir, realpath as realpath2, rename, rm, stat as stat3, writeFile } from "node:fs/promises";
+import { basename as basename3, dirname as dirname2, isAbsolute as isAbsolute2, relative as relative3, resolve as resolve3, sep as sep3 } from "node:path";
+var VERDICT_LABELS = {
+  supports: "\u652F\u6301",
+  weakens: "\u524A\u5F31",
+  refutes: "\u5426\u5B9A",
+  inconclusive: "\u5C1A\u65E0\u5B9A\u8BBA"
+};
+var OUTCOME_LABELS = {
+  observed: "\u51FA\u73B0",
+  partial: "\u90E8\u5206\u51FA\u73B0",
+  "not-observed": "\u672A\u51FA\u73B0"
+};
 var FRONTMATTER = /^---\s*\r?\n([^]*?)\r?\n---\s*\r?\n?/;
 var CHECKPOINT_ROOT_ENV = "RESEARCH_LOOP_CHECKPOINT_DIR";
 var CheckpointStore = class {
   projectRoot;
   checkpointRoot;
   constructor(projectRoot, configuredRoot = process.env[CHECKPOINT_ROOT_ENV] ?? "checkpoints") {
-    this.projectRoot = resolve4(projectRoot);
+    this.projectRoot = resolve3(projectRoot);
     this.checkpointRoot = resolveInside(this.projectRoot, configuredRoot);
   }
-  async write(draft, artifacts) {
+  async write(draft, artifacts, chain) {
     await mkdir(this.checkpointRoot, { recursive: true });
     await assertCheckpointRootSafe(this.projectRoot, this.checkpointRoot);
     const createdAt = /* @__PURE__ */ new Date();
-    const baseId = `checkpoint-${compactTimestamp(createdAt)}-${slugify(draft.title)}`;
+    const baseId = `checkpoint-${compactTimestamp(createdAt)}-${slugify(latexToUnicode(draft.title))}`;
     const { id, directory } = await reserveDirectory(this.checkpointRoot, baseId);
     const metadata = {
-      schema_version: 1,
+      schema_version: 2,
       id,
       title: draft.title.trim(),
       created_at: createdAt.toISOString(),
       experiment_id: draft.experimentId?.trim() || void 0,
-      short_conclusion: draft.shortConclusion.trim(),
-      artifact_paths: artifacts.map((item) => item.artifact.path)
+      short_conclusion: draft.answer.trim(),
+      artifact_paths: artifacts.map((item) => item.artifact.path),
+      proposition_id: chain.proposition.id,
+      question_id: chain.question.id,
+      question: chain.question.question,
+      sequence: chain.sequence,
+      verdict: draft.verdict,
+      verdict_reason: draft.verdictReason.trim(),
+      new_questions: draft.newQuestions.map((item, index) => ({
+        id: chain.newQuestionIds[index],
+        question: item.question.trim(),
+        why_it_arose: item.whyItArose.trim(),
+        proposed_experiment: item.proposedExperiment.trim(),
+        predictions: item.predictions
+      })),
+      revision_proposal: draft.revisionProposal
     };
-    const markdownPath = resolve4(directory, "checkpoint.md");
-    const markdown = buildCheckpointMarkdown(draft, metadata, artifacts, directory);
+    const markdownPath = resolve3(directory, "checkpoint.md");
+    const markdown = buildCheckpointMarkdown(draft, metadata, chain, artifacts, directory);
     const temporaryPath = `${markdownPath}.tmp-${process.pid}-${Date.now()}`;
     try {
       await writeFile(temporaryPath, markdown, "utf8");
@@ -3008,7 +2836,7 @@ var CheckpointStore = class {
         metadata,
         directory,
         markdownPath,
-        relativeMarkdownPath: toPosix2(relative4(this.projectRoot, markdownPath))
+        relativeMarkdownPath: toPosix(relative3(this.projectRoot, markdownPath))
       };
     } catch (error) {
       await rm(directory, { recursive: true, force: true }).catch(() => void 0);
@@ -3019,7 +2847,7 @@ var CheckpointStore = class {
     let files;
     try {
       await assertCheckpointRootSafe(this.projectRoot, this.checkpointRoot);
-      files = await collectMarkdownFiles(this.checkpointRoot, 3);
+      files = await collectMarkdownFiles(this.checkpointRoot, 3, /* @__PURE__ */ new Set([resolve3(this.checkpointRoot, "propositions")]));
     } catch {
       return [];
     }
@@ -3034,28 +2862,30 @@ var CheckpointStore = class {
   }
   async readDiscovered(markdownPath) {
     try {
-      const [markdown, fileStat] = await Promise.all([readFile3(markdownPath, "utf8"), stat4(markdownPath)]);
+      const [markdown, fileStat] = await Promise.all([readFile2(markdownPath, "utf8"), stat3(markdownPath)]);
       const parsed = parseCheckpointMarkdown(markdown);
       const directory = dirname2(markdownPath);
-      const relativeSource = relative4(this.checkpointRoot, markdownPath);
+      const relativeSource = relative3(this.checkpointRoot, markdownPath);
       const fallbackSource = basename3(markdownPath).toLowerCase() === "checkpoint.md" ? dirname2(relativeSource) : relativeSource.replace(/\.md$/i, "");
-      const fallbackId = slugify(toPosix2(fallbackSource));
+      const fallbackId = slugify(toPosix(fallbackSource));
       const title = parsed.metadata?.title || extractTitle(parsed.body) || fallbackId;
       const createdAt = validDate(parsed.metadata?.created_at) ?? fileStat.mtime.toISOString();
       const metadata = {
-        schema_version: 1,
+        ...parsed.metadata,
+        schema_version: parsed.metadata?.schema_version === 2 ? 2 : 1,
         id: parsed.metadata?.id || fallbackId,
         title,
         created_at: createdAt,
         experiment_id: parsed.metadata?.experiment_id,
         short_conclusion: parsed.metadata?.short_conclusion || extractShortConclusion(parsed.body),
-        artifact_paths: Array.isArray(parsed.metadata?.artifact_paths) ? parsed.metadata.artifact_paths : []
+        artifact_paths: Array.isArray(parsed.metadata?.artifact_paths) ? parsed.metadata.artifact_paths : [],
+        new_questions: Array.isArray(parsed.metadata?.new_questions) ? parsed.metadata.new_questions : void 0
       };
       return {
         metadata,
         directory,
         markdownPath,
-        relativeMarkdownPath: toPosix2(relative4(this.projectRoot, markdownPath)),
+        relativeMarkdownPath: toPosix(relative3(this.projectRoot, markdownPath)),
         markdown: parsed.body
       };
     } catch {
@@ -3063,29 +2893,39 @@ var CheckpointStore = class {
     }
   }
 };
-function buildCheckpointMarkdown(draft, metadata, artifacts, checkpointDirectory) {
+function buildCheckpointMarkdown(draft, metadata, chain, artifacts, checkpointDirectory) {
   const rewrite = (text) => rewriteArtifactReferences(text.trim(), artifacts, checkpointDirectory);
-  const resultsMarkdown = rewrite(draft.resultsMarkdown);
+  const observations = rewrite(draft.observationsMarkdown);
+  const newQuestions = metadata.new_questions ?? [];
   const sections = [
     `---
 ${JSON.stringify(metadata)}
 ---`,
-    `# Checkpoint\uFF1A${draft.title.trim()}`,
-    `## 1. \u7814\u7A76\u76EE\u7684
+    `# C${chain.sequence}\uFF1A${draft.title.trim()}`,
+    formatChainSummary(draft, chain, newQuestions),
+    `## 1. \u4E3A\u4EC0\u4E48\u505A\u8FD9\u4E2A\u5B9E\u9A8C
 
-${rewrite(draft.purposeMarkdown)}`,
+${formatOrigin(chain)}
+
+${rewrite(draft.whyMarkdown)}`,
     "---",
-    `## 2. \u5B9E\u9A8C\u8BBE\u7F6E
+    `## 2. \u5B9E\u9A8C\u8BBE\u8BA1\u4E0E\u4E8B\u5148\u9884\u671F
 
-${rewrite(draft.setupMarkdown)}`,
+${formatDesign(draft, rewrite)}
+
+${formatPredictionTable(chain.predictions)}`,
     "---",
-    `## 3. \u7ED3\u679C\u4E0E\u5206\u6790
+    `## 3. \u5B9E\u9645\u89C2\u5BDF
 
-${resultsMarkdown}`,
-    .../^\s*---+\s*$/.test(resultsMarkdown.split(/\r?\n/).at(-1) ?? "") ? [] : ["---"],
-    `## 4. \u7ED3\u8BBA\u4E0E\u4E0B\u4E00\u6B65
+${observations}`,
+    .../^\s*---+\s*$/.test(observations.split(/\r?\n/).at(-1) ?? "") ? [] : ["---"],
+    `## 4. \u5BF9\u7167\u9884\u671F\u7684\u5224\u65AD
 
-${rewrite(draft.conclusionMarkdown)}`,
+${formatJudgment(draft, chain, rewrite)}`,
+    "---",
+    `## 5. \u65B0\u95EE\u9898\u4E0E\u4E0B\u4E00\u6B65\u5B9E\u9A8C
+
+${formatNewQuestions(newQuestions)}`,
     "---",
     `## \u590D\u73B0\u4FE1\u606F
 
@@ -3093,6 +2933,90 @@ ${formatReproduction(draft, artifacts, checkpointDirectory)}`
   ];
   return `${sections.join("\n\n")}
 `;
+}
+function formatChainSummary(draft, chain, newQuestions) {
+  const path = [
+    chain.proposition.id,
+    ...chain.path.map((step) => step.via ? `${step.questionId}\uFF08C${step.via.sequence}\uFF1A${step.via.answer}\uFF09` : `**${step.questionId}\uFF08\u672C\u8F6E\uFF09**`)
+  ].join(" \u2192 ");
+  return [
+    `> **\u547D\u9898 ${chain.proposition.id}**\uFF1A${chain.proposition.statement}  `,
+    `> **\u63A8\u7406\u4F4D\u7F6E**\uFF1A${path}  `,
+    `> **\u672C\u8F6E\u95EE\u9898 ${chain.question.id}**\uFF1A${chain.question.question}  `,
+    `> **\u4E00\u53E5\u8BDD\u7B54\u6848**\uFF1A${draft.answer.trim()}  `,
+    `> **\u5BF9\u547D\u9898\u7684\u5F71\u54CD**\uFF1A${VERDICT_LABELS[draft.verdict]}\u3002${draft.verdictReason.trim()}  `,
+    `> **\u65B0\u95EE\u9898**\uFF1A${newQuestions.length ? newQuestions.map((item) => item.id).join("\u3001") : "\u65E0"}`
+  ].join("\n");
+}
+function formatOrigin(chain) {
+  const origin = chain.question.origin.trim();
+  return chain.raisedBy ? `${chain.question.id} \u7531 C${chain.raisedBy.sequence}\uFF08${chain.raisedBy.title}\uFF09\u63D0\u51FA\uFF1A${origin}` : `${chain.question.id} \u6765\u81EA\u547D\u9898 ${chain.proposition.id} \u7684\u62C6\u89E3\uFF1A${origin}`;
+}
+function formatDesign(draft, rewrite) {
+  const { dataset } = draft;
+  return [
+    "### \u6570\u636E\u96C6",
+    "",
+    `**${dataset.name.trim()}**`,
+    "",
+    `* **\u9009\u62E9\u7406\u7531\uFF1A** ${dataset.reason.trim()}`,
+    `* **\u57FA\u672C\u4FE1\u606F\uFF1A** ${dataset.description.trim()}`,
+    "",
+    "### \u5173\u952E\u8D85\u53C2\u6570",
+    "",
+    "| \u53C2\u6570 | \u53D6\u503C | \u9009\u62E9\u7406\u7531 |",
+    "| --- | --- | --- |",
+    ...draft.keyHyperparameters.map((item) => `| ${tableCell(item.name)} | ${tableCell(item.value)} | ${tableCell(item.reason)} |`),
+    "",
+    "### \u8BBE\u8BA1\u601D\u8DEF",
+    "",
+    rewrite(draft.designMarkdown)
+  ].join("\n");
+}
+function formatPredictionTable(predictions) {
+  return [
+    "**\u4E8B\u5148\u9884\u671F**\uFF08\u8FDB\u5165\u5B9E\u9A8C\u524D\u767B\u8BB0\uFF0C\u4E4B\u540E\u672A\u4FEE\u6539\uFF09",
+    "",
+    "| \u9884\u671F | \u82E5\u89C2\u5BDF\u5230 | \u5219\u8BF4\u660E |",
+    "| --- | --- | --- |",
+    ...predictions.map((prediction, index) => `| \u9884\u671F ${index + 1} | ${tableCell(prediction.observation)} | ${tableCell(prediction.implication)} |`)
+  ].join("\n");
+}
+function formatJudgment(draft, chain, rewrite) {
+  const rows = chain.predictions.map((prediction, index) => {
+    const outcome = draft.predictionOutcomes[index];
+    const label = outcome ? OUTCOME_LABELS[outcome.outcome] : "\u672A\u5224\u65AD";
+    return `| \u9884\u671F ${index + 1} | ${tableCell(prediction.observation)} | ${label} | ${tableCell(outcome?.note ?? "")} |`;
+  });
+  const lines = [
+    "| \u9884\u671F | \u82E5\u89C2\u5BDF\u5230 | \u5B9E\u9645 | \u4F9D\u636E |",
+    "| --- | --- | --- | --- |",
+    ...rows,
+    "",
+    rewrite(draft.judgmentMarkdown),
+    "",
+    `**\u5BF9\u547D\u9898\u7684\u5F71\u54CD\uFF1A** ${VERDICT_LABELS[draft.verdict]}\u3002${draft.verdictReason.trim()}`
+  ];
+  if (draft.revisionProposal) {
+    lines.push(
+      "",
+      `**\u547D\u9898\u4FEE\u8BA2\u5EFA\u8BAE\uFF08\u5F85\u7528\u6237\u786E\u8BA4\uFF09\uFF1A** ${draft.revisionProposal.statement.trim()}\u3002\u7406\u7531\uFF1A${draft.revisionProposal.reason.trim()}`
+    );
+  }
+  return lines.join("\n");
+}
+function formatNewQuestions(questions) {
+  if (questions.length === 0) return "\u672C\u8F6E\u6CA1\u6709\u63D0\u51FA\u65B0\u95EE\u9898\u3002";
+  return questions.map((item) => [
+    `### ${item.id}\u3000${item.question}`,
+    "",
+    `* **\u4E3A\u4EC0\u4E48\u51FA\u73B0\uFF1A** ${item.why_it_arose}`,
+    `* **\u5EFA\u8BAE\u5B9E\u9A8C\uFF1A** ${item.proposed_experiment}`,
+    `* **\u4E8B\u5148\u9884\u671F\uFF1A** ${item.predictions.map((prediction) => `\u82E5${prediction.observation}\uFF0C\u5219${prediction.implication}`).join("\uFF1B")}`
+  ].join("\n")).join("\n\n");
+}
+function tableCell(value) {
+  return value.trim().replace(/\r?\n+/g, " ").split(/(\$\$[^]*?\$\$|\$[^$\n]+\$)/).map((part, index) => index % 2 === 1 ? part : part.replace(/\|/g, "\\|")).join("");
 }
 function parseCheckpointMarkdown(markdown) {
   const match = markdown.match(FRONTMATTER);
@@ -3104,14 +3028,14 @@ function parseCheckpointMarkdown(markdown) {
     return { body: markdown };
   }
 }
-function validateCheckpointDraft(draft, artifacts) {
+function validateCheckpointDraft(draft, artifacts, predictionCount) {
   const errors = [];
   const warnings = [];
   const bodies = [
-    ["\u7814\u7A76\u76EE\u7684", draft.purposeMarkdown],
-    ["\u5B9E\u9A8C\u8BBE\u7F6E", draft.setupMarkdown],
-    ["\u7ED3\u679C\u4E0E\u5206\u6790", draft.resultsMarkdown],
-    ["\u7ED3\u8BBA\u4E0E\u4E0B\u4E00\u6B65", draft.conclusionMarkdown]
+    ["\u4E3A\u4EC0\u4E48\u505A\u8FD9\u4E2A\u5B9E\u9A8C", draft.whyMarkdown],
+    ["\u5B9E\u9A8C\u8BBE\u8BA1", draft.designMarkdown],
+    ["\u5B9E\u9645\u89C2\u5BDF", draft.observationsMarkdown],
+    ["\u5BF9\u7167\u9884\u671F\u7684\u5224\u65AD", draft.judgmentMarkdown]
   ];
   if (!draft.title.trim()) errors.push("Checkpoint title \u4E0D\u80FD\u4E3A\u7A7A\u3002");
   if (/\r|\n/.test(draft.title)) errors.push("Checkpoint title \u5FC5\u987B\u4FDD\u6301\u4E3A\u5355\u884C\u3002");
@@ -3131,8 +3055,27 @@ function validateCheckpointDraft(draft, artifacts) {
     if (!body.trim()) errors.push(`${label}\u6B63\u6587\u4E0D\u80FD\u4E3A\u7A7A\u3002`);
     if (/^#{1,2}\s+/m.test(body)) warnings.push(`${label}\u6B63\u6587\u5305\u542B\u4E00\u7EA7\u6216\u4E8C\u7EA7\u6807\u9898\uFF1BViewer \u4F1A\u4FDD\u7559\uFF0C\u4F46\u5EFA\u8BAE\u53EA\u4F7F\u7528\u4E09\u7EA7\u4EE5\u4E0B\u5C0F\u6807\u9898\u3002`);
   }
-  if (!draft.shortConclusion.trim()) errors.push("shortConclusion \u4E0D\u80FD\u4E3A\u7A7A\u3002");
-  if (/\r|\n/.test(draft.shortConclusion)) errors.push("shortConclusion \u5FC5\u987B\u4FDD\u6301\u4E3A\u5355\u884C\u3002");
+  for (const [field, value] of [["answer", draft.answer], ["verdictReason", draft.verdictReason]]) {
+    if (!value.trim()) errors.push(`${field} \u4E0D\u80FD\u4E3A\u7A7A\u3002`);
+    if (/\r|\n/.test(value)) errors.push(`${field} \u5FC5\u987B\u4FDD\u6301\u4E3A\u5355\u884C\u3002`);
+  }
+  if (draft.predictionOutcomes.length !== predictionCount) {
+    errors.push(`predictionOutcomes \u5FC5\u987B\u6309\u987A\u5E8F\u9010\u6761\u5BF9\u5E94\u8FDB\u5165\u5B9E\u9A8C\u65F6\u767B\u8BB0\u7684 ${predictionCount} \u6761\u9884\u671F\uFF0C\u5F53\u524D\u4E3A ${draft.predictionOutcomes.length} \u6761\u3002`);
+  }
+  draft.predictionOutcomes.forEach((outcome, index) => {
+    if (!outcome.note.trim()) errors.push(`\u9884\u671F ${index + 1} \u7684\u5224\u65AD\u4F9D\u636E\u4E0D\u80FD\u4E3A\u7A7A\u3002`);
+  });
+  draft.newQuestions.forEach((item, index) => {
+    if (![item.question, item.whyItArose, item.proposedExperiment].every((value) => value.trim())) {
+      errors.push(`\u65B0\u95EE\u9898 ${index + 1} \u7684 question\u3001whyItArose \u548C proposedExperiment \u4E0D\u80FD\u4E3A\u7A7A\u3002`);
+    }
+    if (item.predictions.some((prediction) => !prediction.observation.trim() || !prediction.implication.trim())) {
+      errors.push(`\u65B0\u95EE\u9898 ${index + 1} \u7684\u9884\u671F\u5FC5\u987B\u540C\u65F6\u5199\u660E\u89C2\u5BDF\u548C\u542B\u4E49\u3002`);
+    }
+  });
+  if (draft.revisionProposal && (!draft.revisionProposal.statement.trim() || !draft.revisionProposal.reason.trim())) {
+    errors.push("\u547D\u9898\u4FEE\u8BA2\u5EFA\u8BAE\u5FC5\u987B\u540C\u65F6\u5305\u542B\u4FEE\u8BA2\u540E\u7684 statement \u548C reason\u3002");
+  }
   const reproductionFields = [
     ["model", draft.reproduction.model],
     ["modelRevision", draft.reproduction.modelRevision],
@@ -3140,6 +3083,17 @@ function validateCheckpointDraft(draft, artifacts) {
     ["dataRevision", draft.reproduction.dataRevision],
     ["codeCommit", draft.reproduction.codeCommit]
   ];
+  if (![draft.dataset.name, draft.dataset.reason, draft.dataset.description].every((value) => value.trim())) {
+    errors.push("dataset \u7684 name\u3001reason \u548C description \u4E0D\u80FD\u4E3A\u7A7A\uFF1B\u5408\u6210\u6570\u636E\u8BF7\u63CF\u8FF0\u751F\u6210\u8FC7\u7A0B\u3002");
+  }
+  if (draft.keyHyperparameters.length === 0) {
+    errors.push("keyHyperparameters \u81F3\u5C11\u9700\u8981\u4E00\u9879\u4F1A\u5F71\u54CD\u7ED3\u8BBA\u7684\u53C2\u6570\u3002");
+  }
+  draft.keyHyperparameters.forEach((item, index) => {
+    if (![item.name, item.value, item.reason].every((value) => value.trim())) {
+      errors.push(`\u5173\u952E\u8D85\u53C2\u6570 ${index + 1} \u7684 name\u3001value \u548C reason \u4E0D\u80FD\u4E3A\u7A7A\u3002`);
+    }
+  });
   reproductionFields.forEach(([field, value]) => {
     if (!value.trim()) errors.push(`\u590D\u73B0\u4FE1\u606F ${field} \u4E0D\u80FD\u4E3A\u7A7A\uFF1B\u4E0D\u9002\u7528\u65F6\u8BF7\u586B\u5199 not-applicable\u3002`);
   });
@@ -3168,17 +3122,17 @@ function validateCheckpointDraft(draft, artifacts) {
   draft.reproduction.parameters.forEach((parameter) => {
     if (!parameter.name.trim() || !parameter.value.trim()) errors.push("\u590D\u73B0\u53C2\u6570 name \u548C value \u4E0D\u80FD\u4E3A\u7A7A\u3002");
   });
-  validateCheckpointCharts(draft.resultsMarkdown, errors, warnings);
-  validateVisualNarrative(draft.resultsMarkdown, errors);
+  validateCheckpointCharts(draft.observationsMarkdown, errors, warnings);
+  validateVisualNarrative(draft.observationsMarkdown, errors);
   const artifactPaths = /* @__PURE__ */ new Set();
   for (const item of artifacts) {
     if (!item.title.trim() || !item.description.trim()) errors.push(`Artifact ${item.artifact.path} \u7684 title \u548C description \u4E0D\u80FD\u4E3A\u7A7A\u3002`);
     if (artifactPaths.has(item.artifact.path)) errors.push(`Artifact \u91CD\u590D\u767B\u8BB0\uFF1A${item.artifact.path}\u3002`);
     artifactPaths.add(item.artifact.path);
     if (item.role !== "evidence" || !isImage(item.artifact.extension)) continue;
-    const referenced = referencesMarkdownImage(draft.resultsMarkdown, item.path) || referencesMarkdownImage(draft.resultsMarkdown, item.artifact.path);
+    const referenced = referencesMarkdownImage(draft.observationsMarkdown, item.path) || referencesMarkdownImage(draft.observationsMarkdown, item.artifact.path);
     if (!referenced) {
-      errors.push(`\u91CD\u8981\u56FE\u7247 ${item.artifact.path} \u5FC5\u987B\u76F4\u63A5\u5F15\u7528\u5728 resultsMarkdown \u4E2D\uFF0C\u800C\u4E0D\u80FD\u53EA\u4F5C\u4E3A\u9644\u4EF6\u3002`);
+      errors.push(`\u91CD\u8981\u56FE\u7247 ${item.artifact.path} \u5FC5\u987B\u76F4\u63A5\u5F15\u7528\u5728 observationsMarkdown \u4E2D\uFF0C\u800C\u4E0D\u80FD\u53EA\u4F5C\u4E3A\u9644\u4EF6\u3002`);
     }
   }
   return { errors, warnings };
@@ -3354,7 +3308,7 @@ function formatReproduction(draft, artifacts, checkpointDirectory) {
         lines.push(`* ${inlineCode(`${item.artifact.path}/`)}\uFF1A${explanation}`);
         return;
       }
-      const target = toPosix2(relative4(checkpointDirectory, item.absolutePath));
+      const target = toPosix(relative3(checkpointDirectory, item.absolutePath));
       lines.push(`* [${inlineCode(item.artifact.path)}](${encodeMarkdownDestination(target)})\uFF1A${explanation}`);
     });
   }
@@ -3383,9 +3337,9 @@ function rewriteArtifactReferences(markdown, artifacts, checkpointDirectory) {
   let rewritten = markdown;
   for (const item of artifacts) {
     const rawCandidates = /* @__PURE__ */ new Set([item.path, item.artifact.path]);
-    const target = encodeMarkdownDestination(toPosix2(relative4(checkpointDirectory, item.absolutePath)));
+    const target = encodeMarkdownDestination(toPosix(relative3(checkpointDirectory, item.absolutePath)));
     for (const rawCandidate of rawCandidates) {
-      const candidates = /* @__PURE__ */ new Set([rawCandidate, encodeMarkdownDestination(toPosix2(rawCandidate))]);
+      const candidates = /* @__PURE__ */ new Set([rawCandidate, encodeMarkdownDestination(toPosix(rawCandidate))]);
       for (const candidate of candidates) {
         const linkTarget = new RegExp(`(\\]\\(<?)(?:artifact:\\/\\/)?${escapeRegExp(candidate)}(?=>?(?:\\s+["'][^)]*["'])?\\))`, "g");
         rewritten = rewritten.replace(linkTarget, (_match, prefix) => `${prefix}${target}`);
@@ -3406,7 +3360,7 @@ function encodeMarkdownDestination(path) {
 async function reserveDirectory(root, baseId) {
   for (let index = 1; index < 1e4; index += 1) {
     const id = index === 1 ? baseId : `${baseId}-${index}`;
-    const directory = resolve4(root, id);
+    const directory = resolve3(root, id);
     try {
       await mkdir(directory, { recursive: false });
       return { id, directory };
@@ -3416,27 +3370,27 @@ async function reserveDirectory(root, baseId) {
   }
   throw new Error("\u65E0\u6CD5\u4E3A checkpoint \u5206\u914D\u552F\u4E00\u76EE\u5F55\u3002");
 }
-async function collectMarkdownFiles(root, depth) {
+async function collectMarkdownFiles(root, depth, excluded) {
   if (depth < 0) return [];
   const entries = await readdir(root, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
-    const path = resolve4(root, entry.name);
+    const path = resolve3(root, entry.name);
     if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) files.push(path);
-    else if (entry.isDirectory()) files.push(...await collectMarkdownFiles(path, depth - 1));
+    else if (entry.isDirectory() && !excluded.has(path)) files.push(...await collectMarkdownFiles(path, depth - 1, excluded));
   }
   return files;
 }
 function resolveInside(root, configured) {
-  const target = isAbsolute2(configured) ? resolve4(configured) : resolve4(root, configured);
-  if (target === root || !target.startsWith(`${root}${sep4}`)) {
+  const target = isAbsolute2(configured) ? resolve3(configured) : resolve3(root, configured);
+  if (target === root || !target.startsWith(`${root}${sep3}`)) {
     throw new Error(`Checkpoint directory must be a subdirectory inside the project: ${configured}`);
   }
   return target;
 }
 async function assertCheckpointRootSafe(projectRoot, checkpointRoot) {
-  const [realProjectRoot, realCheckpointRoot] = await Promise.all([realpath3(projectRoot), realpath3(checkpointRoot)]);
-  if (!realCheckpointRoot.startsWith(`${realProjectRoot}${sep4}`)) {
+  const [realProjectRoot, realCheckpointRoot] = await Promise.all([realpath2(projectRoot), realpath2(checkpointRoot)]);
+  if (!realCheckpointRoot.startsWith(`${realProjectRoot}${sep3}`)) {
     throw new Error("Checkpoint directory resolves outside the project.");
   }
 }
@@ -3461,7 +3415,7 @@ function validDate(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : void 0;
 }
 function referencesMarkdownImage(markdown, path) {
-  const candidates = /* @__PURE__ */ new Set([path, encodeMarkdownDestination(toPosix2(path))]);
+  const candidates = /* @__PURE__ */ new Set([path, encodeMarkdownDestination(toPosix(path))]);
   return [...candidates].some((candidate) => {
     const target = escapeRegExp(candidate);
     return new RegExp(`!\\[[^\\]]*\\]\\((?:<)?(?:artifact:\\/\\/)?${target}(?:>)?(?:\\s+["'][^)]*["'])?\\)`).test(markdown);
@@ -3473,8 +3427,795 @@ function escapeRegExp(value) {
 function isImage(extension) {
   return [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(extension.toLowerCase());
 }
+function toPosix(path) {
+  return path.split(sep3).join("/");
+}
+
+// src/proposition-store.ts
+var PROPOSITION_DIRECTORY = "propositions";
+var PropositionStore = class {
+  constructor(checkpoints) {
+    this.checkpoints = checkpoints;
+    this.directory = resolve4(checkpoints.checkpointRoot, PROPOSITION_DIRECTORY);
+  }
+  directory;
+  async list() {
+    let names;
+    try {
+      names = await readdir2(this.directory);
+    } catch {
+      return [];
+    }
+    const records = await Promise.all(names.filter((name) => /^P\d+\.md$/i.test(name)).map((name) => this.read(resolve4(this.directory, name))));
+    return records.filter((record) => record !== void 0).sort((left, right) => propositionNumber(left.id) - propositionNumber(right.id));
+  }
+  async find(id) {
+    if (!/^P\d+$/.test(id)) return void 0;
+    return this.read(resolve4(this.directory, `${id}.md`));
+  }
+  async latest() {
+    return (await this.list()).sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0];
+  }
+  async tree(id) {
+    const proposition = await this.find(id);
+    if (!proposition) return void 0;
+    return buildPropositionTree(proposition, await this.checkpoints.list());
+  }
+  async create(input) {
+    const existing = await this.list();
+    const id = `P${Math.max(0, ...existing.map((record2) => propositionNumber(record2.id))) + 1}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const record = {
+      schema_version: 1,
+      id,
+      statement: input.statement.trim(),
+      background: input.background?.trim() || void 0,
+      created_at: now,
+      updated_at: now,
+      questions: input.questions.map((item, index) => ({
+        id: `Q${index + 1}`,
+        question: item.question.trim(),
+        rationale: item.rationale.trim(),
+        source: "initial",
+        created_at: now
+      })),
+      revisions: []
+    };
+    await this.write(record);
+    return record;
+  }
+  async revise(id, statement, reason) {
+    const record = await this.require(id);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    record.revisions.push({ at: now, previous: record.statement, statement: statement.trim(), reason: reason.trim() });
+    record.statement = statement.trim();
+    record.updated_at = now;
+    await this.write(record);
+    return record;
+  }
+  async addQuestion(id, question, rationale, source) {
+    const tree = await this.tree(id);
+    if (!tree) throw new Error(`\u547D\u9898 ${id} \u4E0D\u5B58\u5728\u3002`);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const added = {
+      id: `Q${nextQuestionNumber(tree)}`,
+      question: question.trim(),
+      rationale: rationale.trim(),
+      source,
+      created_at: now
+    };
+    tree.proposition.questions.push(added);
+    tree.proposition.updated_at = now;
+    await this.write(tree.proposition);
+    return added;
+  }
+  async require(id) {
+    const record = await this.find(id);
+    if (!record) throw new Error(`\u547D\u9898 ${id} \u4E0D\u5B58\u5728\u3002`);
+    return record;
+  }
+  async read(path) {
+    try {
+      const { metadata } = parseCheckpointMarkdown(await readFile3(path, "utf8"));
+      const record = metadata;
+      if (!record || typeof record.id !== "string" || typeof record.statement !== "string") return void 0;
+      return {
+        schema_version: 1,
+        id: record.id,
+        statement: record.statement,
+        background: record.background,
+        created_at: record.created_at ?? (/* @__PURE__ */ new Date(0)).toISOString(),
+        updated_at: record.updated_at ?? record.created_at ?? (/* @__PURE__ */ new Date(0)).toISOString(),
+        questions: Array.isArray(record.questions) ? record.questions : [],
+        revisions: Array.isArray(record.revisions) ? record.revisions : []
+      };
+    } catch {
+      return void 0;
+    }
+  }
+  async write(record) {
+    await mkdir2(this.directory, { recursive: true });
+    const path = resolve4(this.directory, `${record.id}.md`);
+    const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile2(temporaryPath, formatPropositionMarkdown(record), "utf8");
+    await rename2(temporaryPath, path);
+  }
+};
+function buildPropositionTree(proposition, discovered) {
+  const owned = discovered.filter((item) => item.metadata.proposition_id === proposition.id && item.metadata.question_id).sort((left, right) => Date.parse(left.metadata.created_at) - Date.parse(right.metadata.created_at));
+  const checkpoints = owned.map((item, index) => ({
+    id: item.metadata.id,
+    sequence: item.metadata.sequence ?? index + 1,
+    title: item.metadata.title,
+    created_at: item.metadata.created_at,
+    question_id: item.metadata.question_id,
+    answer: item.metadata.short_conclusion,
+    verdict: item.metadata.verdict,
+    verdict_reason: item.metadata.verdict_reason,
+    new_question_ids: (item.metadata.new_questions ?? []).map((question) => question.id)
+  }));
+  const questions = proposition.questions.map((question) => ({
+    id: question.id,
+    question: question.question,
+    origin: question.rationale,
+    source: question.source,
+    answered_by: [],
+    status: "open"
+  }));
+  for (const item of owned) {
+    for (const raised of item.metadata.new_questions ?? []) {
+      questions.push({
+        id: raised.id,
+        question: raised.question,
+        origin: raised.why_it_arose,
+        source: "checkpoint",
+        raised_by: item.metadata.id,
+        proposed_experiment: raised.proposed_experiment,
+        predictions: raised.predictions,
+        answered_by: [],
+        status: "open"
+      });
+    }
+  }
+  const byId = new Map(questions.map((question) => [question.id, question]));
+  for (const checkpoint of checkpoints) {
+    const question = byId.get(checkpoint.question_id);
+    if (!question) continue;
+    question.answered_by.push(checkpoint.id);
+    question.status = "answered";
+  }
+  questions.sort((left, right) => questionNumber(left.id) - questionNumber(right.id));
+  return { proposition, questions, checkpoints };
+}
+function nextQuestionNumber(tree) {
+  return Math.max(0, ...tree.questions.map((question) => questionNumber(question.id))) + 1;
+}
+function nextCheckpointSequence(tree) {
+  return Math.max(0, ...tree.checkpoints.map((checkpoint) => checkpoint.sequence)) + 1;
+}
+function questionPath(tree, questionId) {
+  const questions = new Map(tree.questions.map((question2) => [question2.id, question2]));
+  const checkpoints = new Map(tree.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
+  const steps = [];
+  const seen = /* @__PURE__ */ new Set();
+  let question = questions.get(questionId);
+  let via;
+  while (question && !seen.has(question.id)) {
+    seen.add(question.id);
+    steps.unshift({ question, via });
+    via = question.raised_by ? checkpoints.get(question.raised_by) : void 0;
+    question = via ? questions.get(via.question_id) : void 0;
+  }
+  return steps;
+}
+function describePropositionForPolicy(tree, nextQuestionId) {
+  if (!tree) {
+    return [
+      "[RESEARCH PROPOSITION]",
+      "No active proposition. Before any experiment, agree with the user on the proposition being tested: one falsifiable sentence plus 1-5 initial questions that decompose it. Record it with research_proposition action=create; the user confirms it."
+    ].join("\n");
+  }
+  const { proposition } = tree;
+  const checkpoints = new Map(tree.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
+  const open3 = tree.questions.filter((question) => question.status === "open").slice(0, 8);
+  const answered = tree.checkpoints.slice(-5);
+  const lines = [
+    "[RESEARCH PROPOSITION]",
+    `Active proposition ${proposition.id}: ${proposition.statement}`
+  ];
+  if (answered.length) {
+    lines.push("Recent checkpoints:");
+    answered.forEach((checkpoint) => {
+      lines.push(`- C${checkpoint.sequence} answered ${checkpoint.question_id} (${checkpoint.verdict ?? "no verdict"}): ${checkpoint.answer}`);
+    });
+  }
+  if (open3.length) {
+    lines.push("Open questions:");
+    open3.forEach((question) => {
+      const raisedBy = question.raised_by ? checkpoints.get(question.raised_by) : void 0;
+      const origin = raisedBy ? ` [raised by C${raisedBy.sequence}]` : "";
+      const proposal = question.proposed_experiment ? ` Proposed experiment: ${question.proposed_experiment}` : "";
+      lines.push(`- ${question.id}${origin}: ${question.question}${proposal}`);
+    });
+  } else {
+    lines.push("No open questions. Ask the user which question to examine next, then record it with research_proposition action=add_question.");
+  }
+  if (nextQuestionId) lines.push(`The user selected ${nextQuestionId} as the next question.`);
+  lines.push(
+    "Every experiment answers exactly one registered question. Enter Experiment Mode with its questionId, a rationale, and at least two predictions (observation -> implication) that cover supporting and non-supporting outcomes. Record any other question with research_proposition action=add_question before experimenting on it. Suggest proposition revisions only through the checkpoint; the user decides whether to adopt them."
+  );
+  return lines.join("\n");
+}
+function formatPropositionMarkdown(record) {
+  const lines = [
+    `---
+${JSON.stringify(record)}
+---`,
+    "",
+    `# \u547D\u9898 ${record.id}\uFF1A${record.statement}`
+  ];
+  if (record.background) lines.push("", record.background);
+  lines.push("", "## \u767B\u8BB0\u7684\u95EE\u9898", "");
+  if (record.questions.length === 0) lines.push("\u6682\u65E0\u767B\u8BB0\u95EE\u9898\u3002");
+  record.questions.forEach((question) => {
+    lines.push(`* **${question.id}** ${question.question}\uFF1A${question.rationale}`);
+  });
+  if (record.revisions.length) {
+    lines.push("", "## \u4FEE\u8BA2\u8BB0\u5F55", "");
+    record.revisions.forEach((revision) => {
+      lines.push(`* ${revision.at.slice(0, 10)}\uFF1A${revision.previous} \u2192 ${revision.statement}\u3002\u7406\u7531\uFF1A${revision.reason}`);
+    });
+  }
+  lines.push(
+    "",
+    "> \u672C\u6587\u4EF6\u53EA\u4FDD\u5B58\u547D\u9898\u3001\u767B\u8BB0\u7684\u95EE\u9898\u548C\u4FEE\u8BA2\u8BB0\u5F55\u3002\u5B9E\u9A8C\u7ED3\u8BBA\u548C\u540E\u7EED\u95EE\u9898\u4FDD\u5B58\u5728\u5404 checkpoint \u4E2D\uFF0C\u7531 Viewer \u7EC4\u5408\u6210\u95EE\u9898\u6811\u3002",
+    ""
+  );
+  return lines.join("\n");
+}
+function propositionNumber(id) {
+  return Number.parseInt(id.replace(/^P/i, ""), 10) || 0;
+}
+function questionNumber(id) {
+  return Number.parseInt(id.replace(/^Q/i, ""), 10) || 0;
+}
+
+// src/checkpoint-server.ts
+var DEFAULT_HOST = "127.0.0.1";
+var ALL_INTERFACES_HOST = "0.0.0.0";
+var DEFAULT_BASE_PORT = 43119;
+var MAX_PORT_ATTEMPTS = 100;
+var MAX_JSON_PREVIEW_BYTES = 32 * 1024 * 1024;
+var MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024;
+var CheckpointViewerServer = class {
+  constructor(store, options = {}) {
+    this.store = store;
+    this.propositions = new PropositionStore(store);
+    this.host = options.host ?? envHost();
+    this.basePort = normalizeBasePort(options.basePort ?? envBasePort());
+    this.templateOverride = options.template;
+    this.templatePath = options.templatePath ?? fileURLToPath(new URL("./checkpoint-report-template.html", import.meta.url));
+  }
+  host;
+  basePort;
+  templateOverride;
+  templatePath;
+  propositions;
+  server;
+  port;
+  startPromise;
+  get origin() {
+    if (this.port === void 0) return void 0;
+    const accessHost = this.host === ALL_INTERFACES_HOST ? hostname() : this.host;
+    return `http://${accessHost}:${this.port}`;
+  }
+  get exposedToNetwork() {
+    return this.host === ALL_INTERFACES_HOST;
+  }
+  get latestUrl() {
+    return this.origin ? `${this.origin}/latest` : void 0;
+  }
+  async start() {
+    if (this.server?.listening) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startListening();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = void 0;
+    }
+  }
+  async stop() {
+    await this.startPromise?.catch(() => void 0);
+    const server = this.server;
+    this.server = void 0;
+    this.port = void 0;
+    if (!server?.listening) return;
+    await new Promise((resolveClose) => server.close(() => resolveClose()));
+  }
+  async startListening() {
+    const template = this.templateOverride ?? await readFile4(this.templatePath, "utf8");
+    if (!template.includes("checkpoint-viewer")) {
+      throw new Error("Checkpoint Viewer template is missing its viewer root marker.");
+    }
+    let lastError;
+    for (let offset = 0; offset < MAX_PORT_ATTEMPTS; offset += 1) {
+      const port = this.basePort + offset;
+      if (port > 65535) break;
+      const server2 = this.createHttpServer(template);
+      try {
+        await listen(server2, port, this.host);
+        server2.unref();
+        this.server = server2;
+        this.port = port;
+        return;
+      } catch (error) {
+        lastError = error;
+        server2.close();
+        const code = error.code;
+        if (code !== "EADDRINUSE" && code !== "EACCES") throw error;
+      }
+    }
+    const server = this.createHttpServer(template);
+    try {
+      await listen(server, 0, this.host);
+      server.unref();
+      this.server = server;
+      this.port = server.address().port;
+    } catch (error) {
+      server.close();
+      throw new Error(`Could not bind the Checkpoint Viewer to ${this.host}.`, { cause: lastError ?? error });
+    }
+  }
+  createHttpServer(template) {
+    return createServer((request, response) => {
+      void this.handleRequest(template, request, response).catch((error) => {
+        if (response.headersSent) response.destroy(error);
+        else send(response, 500, "text/plain; charset=utf-8", `Checkpoint Viewer error: ${String(error)}`);
+      });
+    });
+  }
+  async handleRequest(template, request, response) {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      send(response, 405, "text/plain; charset=utf-8", "Method not allowed", request.method === "HEAD");
+      return;
+    }
+    const url = new URL(request.url ?? "/", `http://${DEFAULT_HOST}`);
+    if (url.pathname === "/health") {
+      send(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true }), request.method === "HEAD");
+      return;
+    }
+    if (url.pathname === "/" || url.pathname === "/latest" || /^\/checkpoints\/[^/]+$/.test(url.pathname) || /^\/propositions\/P\d+$/.test(url.pathname)) {
+      sendHtml(response, template, request.method === "HEAD");
+      return;
+    }
+    if (url.pathname === "/api/checkpoints") {
+      const checkpoints = await this.store.list();
+      sendJson(response, 200, checkpoints.map((item) => historyEntry(item)), request.method === "HEAD");
+      return;
+    }
+    if (url.pathname === "/api/propositions") {
+      const [records, checkpoints] = await Promise.all([this.propositions.list(), this.store.list()]);
+      sendJson(response, 200, records.map((record) => {
+        const tree = buildPropositionTree(record, checkpoints);
+        return {
+          id: record.id,
+          statement: record.statement,
+          statement_html: mathTextHtml(record.statement),
+          updated_at: record.updated_at,
+          url: `/propositions/${record.id}`,
+          questions: tree.questions.length,
+          open_questions: tree.questions.filter((question) => question.status === "open").length,
+          checkpoints: tree.checkpoints.length,
+          latest_answer: tree.checkpoints.at(-1)?.answer,
+          latest_answer_html: mathTextHtml(tree.checkpoints.at(-1)?.answer)
+        };
+      }), request.method === "HEAD");
+      return;
+    }
+    const propositionMatch = url.pathname.match(/^\/api\/propositions\/(P\d+)$/);
+    if (propositionMatch) {
+      const tree = await this.propositions.tree(propositionMatch[1]);
+      if (!tree) {
+        sendJson(response, 404, { error: "Proposition not found." }, request.method === "HEAD");
+        return;
+      }
+      sendJson(response, 200, {
+        proposition: {
+          ...tree.proposition,
+          statement_html: mathTextHtml(tree.proposition.statement),
+          background_html: mathTextHtml(tree.proposition.background),
+          revisions: tree.proposition.revisions.map((revision) => ({
+            ...revision,
+            previous_html: mathTextHtml(revision.previous),
+            statement_html: mathTextHtml(revision.statement),
+            reason_html: mathTextHtml(revision.reason)
+          }))
+        },
+        questions: tree.questions.map((question) => ({
+          ...question,
+          question_html: mathTextHtml(question.question),
+          origin_html: mathTextHtml(question.origin),
+          proposed_experiment_html: mathTextHtml(question.proposed_experiment)
+        })),
+        checkpoints: tree.checkpoints.map((checkpoint) => ({
+          ...checkpoint,
+          title_html: mathTextHtml(checkpoint.title),
+          answer_html: mathTextHtml(checkpoint.answer),
+          url: `/checkpoints/${encodeURIComponent(checkpoint.id)}`
+        }))
+      }, request.method === "HEAD");
+      return;
+    }
+    if (url.pathname === "/api/latest") {
+      const checkpoint = await this.store.latest();
+      if (!checkpoint) {
+        sendJson(response, 404, { error: "No checkpoints found." }, request.method === "HEAD");
+        return;
+      }
+      sendJson(response, 200, renderCheckpoint(this.store, checkpoint), request.method === "HEAD");
+      return;
+    }
+    const checkpointMatch = url.pathname.match(/^\/api\/checkpoints\/([^/]+)$/);
+    if (checkpointMatch) {
+      let id;
+      try {
+        id = decodeURIComponent(checkpointMatch[1]);
+      } catch {
+        sendJson(response, 400, { error: "Malformed checkpoint id." }, request.method === "HEAD");
+        return;
+      }
+      const checkpoint = await this.store.find(id);
+      if (!checkpoint) {
+        sendJson(response, 404, { error: "Checkpoint not found." }, request.method === "HEAD");
+        return;
+      }
+      sendJson(response, 200, renderCheckpoint(this.store, checkpoint), request.method === "HEAD");
+      return;
+    }
+    if (url.pathname.startsWith("/api/artifacts/")) {
+      await this.serveArtifactPreview(url.pathname.slice("/api/artifacts/".length), response, request.method === "HEAD");
+      return;
+    }
+    if (url.pathname.startsWith("/artifacts/")) {
+      await this.serveArtifact(url.pathname.slice("/artifacts/".length), response, request.method === "HEAD");
+      return;
+    }
+    send(response, 404, "text/plain; charset=utf-8", "Not found", request.method === "HEAD");
+  }
+  async serveArtifact(encodedPath, response, headOnly) {
+    const resolved = await resolveArtifactPath(this.store.projectRoot, encodedPath);
+    if (resolved.status === "forbidden") {
+      send(response, 403, "text/plain; charset=utf-8", "Artifact path is outside the project.", headOnly);
+      return;
+    }
+    if (resolved.status === "missing") {
+      send(response, 404, "text/plain; charset=utf-8", "Artifact not found.", headOnly);
+      return;
+    }
+    const path = resolved.path;
+    let fileStat;
+    try {
+      fileStat = await stat4(path);
+    } catch {
+      send(response, 404, "text/plain; charset=utf-8", "Artifact not found.", headOnly);
+      return;
+    }
+    if (!fileStat.isFile()) {
+      send(response, 404, "text/plain; charset=utf-8", "Artifact is not a file.", headOnly);
+      return;
+    }
+    response.writeHead(200, {
+      "Content-Type": mimeType(extname4(path)),
+      "Content-Length": fileStat.size,
+      "Cache-Control": "no-cache",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      "X-Content-Type-Options": "nosniff"
+    });
+    if (headOnly) response.end();
+    else createReadStream2(path).pipe(response);
+  }
+  async serveArtifactPreview(encodedPath, response, headOnly) {
+    const resolved = await resolveArtifactPath(this.store.projectRoot, encodedPath);
+    if (resolved.status === "forbidden") {
+      sendJson(response, 403, { error: "Artifact path is outside the project." }, headOnly);
+      return;
+    }
+    if (resolved.status === "missing") {
+      sendJson(response, 404, { error: "Artifact not found." }, headOnly);
+      return;
+    }
+    const path = resolved.path;
+    let fileStat;
+    try {
+      fileStat = await stat4(path);
+    } catch {
+      sendJson(response, 404, { error: "Artifact not found." }, headOnly);
+      return;
+    }
+    if (!fileStat.isFile()) {
+      sendJson(response, 404, { error: "Artifact is not a file." }, headOnly);
+      return;
+    }
+    const extension = extname4(path).toLowerCase();
+    if (extension !== ".json" && extension !== ".csv") {
+      sendJson(response, 415, { error: "Preview supports JSON and CSV only." }, headOnly);
+      return;
+    }
+    const limit = extension === ".json" ? MAX_JSON_PREVIEW_BYTES : MAX_TEXT_PREVIEW_BYTES;
+    const truncated = fileStat.size > limit;
+    const handle = await open2(path, "r");
+    try {
+      const buffer = Buffer.alloc(Math.min(fileStat.size, limit));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      sendJson(response, 200, {
+        kind: extension.slice(1),
+        size: fileStat.size,
+        truncated,
+        text: buffer.toString("utf8", 0, bytesRead)
+      }, headOnly);
+    } finally {
+      await handle.close();
+    }
+  }
+};
+function formatSshPortForwardCommand(reportUrl, sshHost = process.env.RESEARCH_LOOP_SSH_HOST?.trim() || hostname()) {
+  const port = new URL(reportUrl).port;
+  if (!port) throw new Error(`Checkpoint Viewer URL has no port: ${reportUrl}`);
+  return `ssh -N -o RemoteCommand=none -o RequestTTY=no -L ${port}:127.0.0.1:${port} ${sshHost}`;
+}
+function renderCheckpoint(store, checkpoint) {
+  const { html, toc } = renderMarkdown(store, checkpoint);
+  return {
+    metadata: {
+      ...checkpoint.metadata,
+      short_conclusion_html: mathTextHtml(checkpoint.metadata.short_conclusion),
+      title_text: latexToUnicode(checkpoint.metadata.title)
+    },
+    markdown_path: checkpoint.relativeMarkdownPath,
+    html,
+    toc
+  };
+}
+function renderMarkdown(store, checkpoint) {
+  const protectedMath = protectMathSegments(checkpoint.markdown);
+  const toc = [];
+  const usedIds = /* @__PURE__ */ new Map();
+  const renderer = new P();
+  renderer.html = ({ text }) => `<pre class="raw-html">${escapeHtml(text)}</pre>`;
+  renderer.heading = function({ tokens, depth }) {
+    const content = this.parser.parseInline(tokens);
+    const plain = stripHtml(protectedMath.restore(content));
+    const base = headingSlug(plain) || "section";
+    const count2 = (usedIds.get(base) ?? 0) + 1;
+    usedIds.set(base, count2);
+    const id = count2 === 1 ? base : `${base}-${count2}`;
+    if (depth >= 2 && depth <= 3) toc.push({ id, text: plain, depth });
+    const className = depth === 3 && /^表\s*[0-9一二三四五六七八九十百]+[\s　.:：、—-]/.test(plain) ? ' class="table-title"' : "";
+    return `<h${depth} id="${escapeAttribute(id)}"${className}>${content}</h${depth}>
+`;
+  };
+  const defaultCode = renderer.code.bind(renderer);
+  renderer.code = (token) => {
+    if ((token.lang ?? "").trim().toLowerCase() !== "checkpoint-chart") return defaultCode(token);
+    try {
+      const config = JSON.parse(token.text);
+      const encoded = Buffer.from(JSON.stringify(config), "utf8").toString("base64url");
+      return `<figure class="checkpoint-chart" data-chart="${encoded}"></figure>
+`;
+    } catch {
+      return `<pre class="chart-error"><code>${escapeHtml(token.text)}</code></pre>
+`;
+    }
+  };
+  renderer.paragraph = function({ tokens }) {
+    const content = this.parser.parseInline(tokens);
+    return tokens.length === 1 && tokens[0]?.type === "image" ? `${content}
+` : `<p>${content}</p>
+`;
+  };
+  renderer.image = ({ href, title, text }) => {
+    const target = markdownTarget(store, checkpoint, href);
+    if (!target) return `<span class="broken-artifact">[\u65E0\u6CD5\u8BBF\u95EE\u56FE\u7247\uFF1A${escapeHtml(text)}]</span>`;
+    const caption = title || text;
+    return `<figure class="checkpoint-figure"><img src="${escapeAttribute(target.url)}" alt="${escapeAttribute(text)}" loading="lazy"><figcaption>${escapeHtml(caption)}</figcaption></figure>`;
+  };
+  renderer.link = function({ href, title, tokens }) {
+    const label = this.parser.parseInline(tokens);
+    const target = markdownTarget(store, checkpoint, href);
+    if (!target) return `<span class="broken-artifact">${label}</span>`;
+    const titleAttribute = title ? ` title="${escapeAttribute(title)}"` : "";
+    const preview2 = target.previewKind ? ` data-preview-kind="${target.previewKind}" data-preview-url="${escapeAttribute(target.previewUrl)}"` : "";
+    const external = target.external ? ' target="_blank" rel="noreferrer"' : "";
+    return `<a href="${escapeAttribute(target.url)}"${titleAttribute}${preview2}${external}>${label}</a>`;
+  };
+  const marked = new Z({ gfm: true, breaks: false, renderer });
+  const rendered = String(marked.parse(protectedMath.markdown));
+  return { html: protectedMath.restore(rendered), toc };
+}
+function mathTextHtml(text) {
+  if (text === void 0) return void 0;
+  const math = protectMathSegments(text);
+  return math.restore(escapeHtml(math.markdown));
+}
+function protectMathSegments(markdown) {
+  let marker = "RESEARCHLOOPMATHSEGMENT";
+  while (markdown.includes(marker)) marker += "X";
+  const codeSegments = [];
+  const mathSegments = [];
+  const stashCode = (value) => {
+    const token = `${marker}CODE${codeSegments.length}END`;
+    codeSegments.push(value);
+    return token;
+  };
+  let protectedMarkdown = markdown.replace(/(```|~~~)[^]*?\1/g, stashCode).replace(/(`+)[^]*?\1/g, stashCode);
+  const stashMath = (content, display) => {
+    const token = `${marker}${mathSegments.length}END`;
+    mathSegments.push({ content, display });
+    return token;
+  };
+  protectedMarkdown = protectedMarkdown.replace(/\$\$([^]*?)\$\$/g, (_match, content) => stashMath(content, true)).replace(/\\\[([^]*?)\\\]/g, (_match, content) => stashMath(content, true)).replace(/\\\(([^]*?)\\\)/g, (_match, content) => stashMath(content, false)).replace(/(^|[^\\$])\$(?!\$|\s)([^$\n]*?\S)\$(?!\d|\$)/g, (_match, prefix, content) => {
+    return `${prefix}${stashMath(content, false)}`;
+  });
+  codeSegments.forEach((segment, index) => {
+    protectedMarkdown = protectedMarkdown.replace(`${marker}CODE${index}END`, () => segment);
+  });
+  return {
+    markdown: protectedMarkdown,
+    restore(html) {
+      let restored = html;
+      mathSegments.forEach((segment, index) => {
+        const delimiter = segment.display ? `\\[${escapeHtml(segment.content)}\\]` : `\\(${escapeHtml(segment.content)}\\)`;
+        restored = restored.replaceAll(`${marker}${index}END`, () => delimiter);
+      });
+      return restored;
+    }
+  };
+}
+function markdownTarget(store, checkpoint, href) {
+  if (/^(?:https?:|mailto:)/i.test(href)) return { url: href, external: true };
+  if (href.startsWith("#")) return { url: href, external: false };
+  if (/^[a-z][a-z\d+.-]*:/i.test(href)) return void 0;
+  let decoded;
+  try {
+    decoded = decodeURIComponent(href.split(/[?#]/, 1)[0]);
+  } catch {
+    return void 0;
+  }
+  const absolute = resolve5(checkpoint.directory, decoded);
+  if (!isInside(store.projectRoot, absolute)) return void 0;
+  const projectPath = toPosix2(relative4(store.projectRoot, absolute));
+  const encoded = encodeProjectPath(projectPath);
+  const extension = extname4(absolute).toLowerCase();
+  const previewKind = extension === ".json" ? "json" : extension === ".csv" ? "csv" : void 0;
+  return {
+    url: `/artifacts/${encoded}`,
+    external: false,
+    previewKind,
+    previewUrl: previewKind ? `/api/artifacts/${encoded}` : void 0
+  };
+}
+function historyEntry(checkpoint) {
+  return {
+    ...checkpoint.metadata,
+    title_html: mathTextHtml(checkpoint.metadata.title),
+    short_conclusion_html: mathTextHtml(checkpoint.metadata.short_conclusion),
+    markdown_path: checkpoint.relativeMarkdownPath,
+    url: `/checkpoints/${encodeURIComponent(checkpoint.metadata.id)}`
+  };
+}
+async function resolveArtifactPath(projectRoot, encodedPath) {
+  let decoded;
+  try {
+    decoded = encodedPath.split("/").map((part) => decodeURIComponent(part)).join("/");
+  } catch {
+    return { status: "forbidden" };
+  }
+  const lexicalPath = resolve5(projectRoot, decoded);
+  if (!isInside(projectRoot, lexicalPath)) return { status: "forbidden" };
+  try {
+    const [realProjectRoot, realArtifactPath] = await Promise.all([realpath3(projectRoot), realpath3(lexicalPath)]);
+    return isInside(realProjectRoot, realArtifactPath) ? { status: "ok", path: realArtifactPath } : { status: "forbidden" };
+  } catch {
+    return { status: "missing" };
+  }
+}
+function encodeProjectPath(path) {
+  return path.split("/").map((part) => encodeURIComponent(part)).join("/");
+}
+function headingSlug(value) {
+  return value.normalize("NFKC").toLowerCase().replace(/[^\p{Letter}\p{Number}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+}
+function stripHtml(value) {
+  return value.replace(/<[^>]*>/g, "").replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => ({
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&quot;": '"',
+    "&#39;": "'"
+  })[entity] ?? entity).trim();
+}
+function escapeHtml(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+function escapeAttribute(value) {
+  return escapeHtml(value);
+}
+function isInside(root, path) {
+  const normalizedRoot = resolve5(root);
+  const normalizedPath = resolve5(path);
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${sep4}`);
+}
 function toPosix2(path) {
   return path.split(sep4).join("/");
+}
+function mimeType(extension) {
+  return {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".json": "application/json; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".log": "text/plain; charset=utf-8",
+    ".out": "text/plain; charset=utf-8",
+    ".yaml": "text/yaml; charset=utf-8",
+    ".yml": "text/yaml; charset=utf-8",
+    ".jsonl": "application/x-ndjson; charset=utf-8",
+    ".pdf": "application/pdf"
+  }[extension.toLowerCase()] ?? "application/octet-stream";
+}
+function envHost() {
+  const configured = process.env.RESEARCH_LOOP_CHECKPOINT_HOST?.trim() || DEFAULT_HOST;
+  if (configured === DEFAULT_HOST || configured === ALL_INTERFACES_HOST) return configured;
+  throw new Error(`RESEARCH_LOOP_CHECKPOINT_HOST must be ${DEFAULT_HOST} or ${ALL_INTERFACES_HOST}: ${configured}`);
+}
+function envBasePort() {
+  const configured = Number.parseInt(process.env.RESEARCH_LOOP_CHECKPOINT_PORT ?? "", 10);
+  return Number.isInteger(configured) ? configured : DEFAULT_BASE_PORT;
+}
+function normalizeBasePort(value) {
+  return Number.isInteger(value) && value >= 1024 && value <= 65535 ? value : DEFAULT_BASE_PORT;
+}
+function listen(server, port, host) {
+  return new Promise((resolveListen, reject) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolveListen();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
+  });
+}
+function sendHtml(response, body, headOnly) {
+  response.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store, max-age=0",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer"
+  });
+  response.end(headOnly ? void 0 : body);
+}
+function sendJson(response, status, value, headOnly) {
+  send(response, status, "application/json; charset=utf-8", JSON.stringify(value), headOnly);
+}
+function send(response, status, contentType, body, headOnly = false) {
+  response.writeHead(status, {
+    "Content-Type": contentType,
+    "Cache-Control": "no-store, max-age=0",
+    "X-Content-Type-Options": "nosniff"
+  });
+  response.end(headOnly ? void 0 : body);
 }
 
 // src/terminal-image.ts
@@ -3559,38 +4300,76 @@ var ChafaImage = class {
 };
 
 // src/checkpoint.ts
+var PREDICTION = Type.Object({
+  observation: Type.String({ description: "\u82E5\u89C2\u5BDF\u5230\u7684\u5177\u4F53\u73B0\u8C61\uFF0C\u6700\u597D\u5E26\u53EF\u6BD4\u8F83\u7684\u6570\u503C\u6216\u65B9\u5411" }),
+  implication: Type.String({ description: "\u5219\u8BF4\u660E\u4EC0\u4E48\uFF0C\u5BF9\u5E94\u5230\u95EE\u9898\u6216\u547D\u9898" })
+});
 function registerResearchCheckpoint(pi, dependencies) {
   pi.registerTool({
     name: "research_checkpoint",
     label: "Research Checkpoint",
-    description: "Write a persistent Chinese Markdown research note for the completed experiment, save it under checkpoints/, and return Research Loop to Exploration Mode. The four Markdown bodies must read as a concise continuous research note rather than a log. Important figures must be referenced in resultsMarkdown. Call this alone as the final tool action.",
-    promptSnippet: "Write the completed experiment as a persistent Markdown checkpoint",
+    description: "Record the completed experiment as one link in the active proposition's chain of reasoning: why this question was asked, what was predicted, what was observed, how it bears on the proposition, and which new questions follow. Saves a Chinese Markdown note under checkpoints/ and returns Research Loop to Exploration Mode. Call this alone as the final tool action.",
+    promptSnippet: "Write the completed experiment as a proposition-linked Markdown checkpoint",
     promptGuidelines: [
+      "Write for a reader who knows the proposition but has not followed this session. The plugin already prints the proposition, the reasoning path, this round's question, and the registered predictions; do not repeat them, build on them.",
       "Write primarily in natural Chinese. Use Chinese (English term) the first time a necessary technical term appears, then use the Chinese term consistently.",
-      "The four bodies map to \u7814\u7A76\u76EE\u7684\u3001\u5B9E\u9A8C\u8BBE\u7F6E\u3001\u7ED3\u679C\u4E0E\u5206\u6790\u3001\u7ED3\u8BBA\u4E0E\u4E0B\u4E00\u6B65. Do not repeat those level-one or level-two headings inside the bodies.",
-      "ResultsMarkdown must be the longest section and follow \u5B9E\u9A8C\u73B0\u8C61 \u2192 \u56FE\u8868\u8BC1\u636E \u2192 \u56FE\u8868\u542B\u4E49 \u2192 \u7ED3\u679C\u89E3\u91CA \u2192 \u5C40\u90E8\u7ED3\u8BBA. Every visual must form an independent \u56FE\uFF08\u8868\uFF09\u2192 \u6B63\u5F0F\u6807\u9898 \u2192 \u89E3\u6790 unit, followed by a standalone --- separator before the next visual.",
-      "Follow \u4E0A\u8868\u4E0B\u56FE\uFF1Awrite a table title above the Markdown table as ### \u8868 N\u3000\u6807\u9898; put a figure title below the image by using \u56FE N\u3000\u6807\u9898 as the Markdown image caption. Do not place a ### \u56FE heading above an image. After each table, image, or checkpoint-chart, write a prose paragraph explaining what its content means.",
+      "whyMarkdown explains what earlier evidence left unresolved and why this experiment can separate the explanations. dataset names the data, why it suits this question, and its basic facts (size, splits, features or inputs, labels or targets; for synthetic data, the generating process with its parameters). keyHyperparameters lists every setting that could change the conclusion, such as sample sizes, model size, regularization, learning rate, training length and number of seeds, each with its value and why it was chosen. designMarkdown explains the design thinking: conditions and controls, what is held fixed, the metric and the decision rule. Complete audit detail belongs in protocols and reproduction.",
+      "observationsMarkdown contains only the evidence needed to answer this round's question. Every visual forms an independent \u56FE\uFF08\u8868\uFF09\u2192 \u6B63\u5F0F\u6807\u9898 \u2192 \u89E3\u6790 unit followed by a standalone --- separator. Table titles go above tables as ### \u8868 N\u3000\u6807\u9898; figure titles go below images as the Markdown caption \u56FE N\u3000\u6807\u9898.",
+      "predictionOutcomes judge each registered prediction in order. judgmentMarkdown explains the judgment, including anything unexpected, and states what this result cannot establish.",
+      "verdict states how this result bears on the proposition. When the result says the proposition should be narrowed or restated, put it in revisionProposal; only the user can adopt it.",
+      "newQuestions lists at most three questions that this result genuinely raised, each with why it arose, the experiment that would answer it, and at least two predictions. Leave it empty when no real question follows.",
       "Never use the Chinese contrast construction \u4E0D\u662F\u2026\u2026\u800C\u662F\u2026\u2026 or close variants such as \u5E76\u975E\u2026\u2026\u800C\u662F\u2026\u2026\u3001\u4E0D\u5728\u4E8E\u2026\u2026\u800C\u5728\u4E8E\u2026\u2026\u3001\u800C\u4E0D\u662F and \u800C\u975E anywhere in a checkpoint. State the observation and conclusion directly.",
-      "Keep only result-essential settings in setupMarkdown. Put model revision, data revision, commit, seeds, full paths and audit details in structured reproduction/protocol fields.",
-      "Use a fenced checkpoint-chart block containing JSON for lightweight presentation-only bar or line charts. Never create a PNG solely for checkpoint decoration.",
+      "Write every formula, variable, estimator, metric definition and quantitative relation as LaTeX in every field: inline $...$, and display $$...$$ on its own lines for any equation the reader should study. Define each symbol at first use, for example $n$ \u4E3A\u8BAD\u7EC3\u6837\u672C\u6570\u3001$d$ \u4E3A\u7279\u5F81\u7EF4\u5EA6. Prefer $\\hat{\\beta} = X^{+} y$ over code-style or plain-text math such as beta_hat = pinv(X) @ y or n/d.",
+      "Help the reader see the evidence. Whenever a result involves numbers, show the key comparison as a table or figure in observationsMarkdown: prefer figures the experiment code already saved, use a Markdown table for exact values across conditions, and use a fenced checkpoint-chart block containing JSON for a quick bar or line summary when no figure exists. designMarkdown may add a small conditions table titled ### \u8868 N, numbered in sequence with the observations. Never create a PNG solely for checkpoint decoration.",
       "For a reproduction, record paper, README and issue coverage plus every approved or unapproved deviation."
     ],
     parameters: Type.Object({
-      title: Type.String({ description: "\u4E00\u53E5\u8BDD\u6982\u62EC\u672C\u6B21\u5B9E\u9A8C\u53CA\u6700\u91CD\u8981\u73B0\u8C61\uFF0C\u4E0D\u52A0 Checkpoint \u524D\u7F00" }),
+      title: Type.String({ description: "\u4E00\u53E5\u8BDD\u6982\u62EC\u672C\u8F6E\u6700\u91CD\u8981\u7684\u53D1\u73B0\uFF0C\u4E0D\u52A0 Checkpoint \u6216 C \u7F16\u53F7\u524D\u7F00" }),
       experimentId: Type.Optional(Type.String({ description: "Stable experiment/run identifier when one exists" })),
-      shortConclusion: Type.String({ description: "\u7B2C\u4E00\u5C4F\u663E\u793A\u7684\u4E00\u53E5\u8BDD\u6700\u4FDD\u5B88\u7ED3\u8BBA" }),
-      purposeMarkdown: Type.String({
-        description: "\u7814\u7A76\u76EE\u7684\u6B63\u6587\uFF1A\u524D\u7F6E\u73B0\u8C61\u3001\u8981\u533A\u5206\u7684\u95EE\u9898\u3001\u89E3\u91CA A/B\u3001\u6838\u5FC3\u5047\u8BBE\u53CA\u53CC\u65B9\u9884\u671F\uFF1B\u4E0D\u8981\u5305\u542B\u4E8C\u7EA7\u6807\u9898"
+      answer: Type.String({ description: "\u5BF9\u672C\u8F6E\u95EE\u9898\u7684\u4E00\u53E5\u8BDD\u56DE\u7B54\uFF0C\u4FDD\u5B88\u4E14\u53EF\u88AB\u8BC1\u636E\u652F\u6301" }),
+      verdict: StringEnum(["supports", "weakens", "refutes", "inconclusive"], {
+        description: "\u672C\u8F6E\u7ED3\u679C\u5BF9\u547D\u9898\u7684\u5F71\u54CD"
       }),
-      setupMarkdown: Type.String({
-        description: "\u5B9E\u9A8C\u8BBE\u7F6E\u6B63\u6587\uFF1A\u7CFB\u7EDF\u3001\u4EFB\u52A1\u3001\u4E3B\u8981\u6761\u4EF6\u5DEE\u5F02\u3001\u65B9\u6CD5\u3001\u5FC5\u8981\u53C2\u6570\u3001\u6307\u6807\u4E0E\u9884\u5148\u5224\u65AD\u6807\u51C6\uFF1B\u4E0D\u8981\u5806\u780C\u5BA1\u8BA1\u4FE1\u606F"
+      verdictReason: Type.String({ description: "\u4E00\u53E5\u8BDD\u8BF4\u660E verdict \u7684\u4F9D\u636E" }),
+      whyMarkdown: Type.String({ description: "\u4E3A\u4EC0\u4E48\u505A\u8FD9\u4E2A\u5B9E\u9A8C\uFF1A\u6B64\u524D\u8BC1\u636E\u7559\u4E0B\u4E86\u4EC0\u4E48\u672A\u51B3\u95EE\u9898\uFF0C\u672C\u5B9E\u9A8C\u4E3A\u4EC0\u4E48\u80FD\u533A\u5206\u4E0D\u540C\u89E3\u91CA\uFF1B\u4E0D\u8981\u5305\u542B\u4E8C\u7EA7\u6807\u9898" }),
+      dataset: Type.Object({
+        name: Type.String({ description: "\u6570\u636E\u96C6\u540D\u79F0\u53CA\u7248\u672C\u6216 split\uFF1B\u5408\u6210\u6570\u636E\u5199\u660E\u751F\u6210\u65B9\u5F0F\u7684\u540D\u79F0" }),
+        reason: Type.String({ description: "\u4E3A\u4EC0\u4E48\u8FD9\u4E2A\u6570\u636E\u96C6\u9002\u5408\u56DE\u7B54\u672C\u8F6E\u95EE\u9898" }),
+        description: Type.String({ description: "\u57FA\u672C\u4FE1\u606F\uFF1A\u6837\u672C\u91CF\u3001\u5212\u5206\u3001\u7279\u5F81\u6216\u8F93\u5165\u3001\u6807\u7B7E\u6216\u76EE\u6807\uFF1B\u5408\u6210\u6570\u636E\u5199\u660E\u751F\u6210\u8FC7\u7A0B\u53CA\u5176\u53C2\u6570" })
+      }, { description: "\u672C\u8F6E\u4F7F\u7528\u7684\u6570\u636E\u96C6\uFF1B\u7531\u63D2\u4EF6\u56FA\u5B9A\u663E\u793A\u5728\u5B9E\u9A8C\u8BBE\u8BA1\u5F00\u5934" }),
+      keyHyperparameters: Type.Array(
+        Type.Object({
+          name: Type.String({ description: "\u53C2\u6570\u540D\uFF0C\u6570\u5B66\u91CF\u7528 LaTeX" }),
+          value: Type.String({ description: "\u5B9E\u9645\u53D6\u503C\u6216\u626B\u63CF\u8303\u56F4" }),
+          reason: Type.String({ description: "\u4E3A\u4EC0\u4E48\u53D6\u8FD9\u4E2A\u503C" })
+        }),
+        { minItems: 1, maxItems: 12, description: "\u4F1A\u5F71\u54CD\u7ED3\u8BBA\u7684\u5173\u952E\u8D85\u53C2\u6570\uFF0C\u4F8B\u5982\u6837\u672C\u91CF\u3001\u6A21\u578B\u89C4\u6A21\u3001\u6B63\u5219\u5316\u3001\u5B66\u4E60\u7387\u3001\u8BAD\u7EC3\u957F\u5EA6\u548C\u79CD\u5B50\u6570" }
+      ),
+      designMarkdown: Type.String({ description: "\u8BBE\u8BA1\u601D\u8DEF\uFF1A\u6761\u4EF6\u4E0E\u5BF9\u7167\u3001\u56FA\u5B9A\u4E0D\u53D8\u7684\u91CF\u3001\u6307\u6807\u548C\u5224\u65AD\u89C4\u5219\uFF1B\u6A21\u578B\u3001\u6307\u6807\u548C\u5224\u65AD\u89C4\u5219\u7528 LaTeX \u516C\u5F0F\u5199\u51FA\uFF0C\u6761\u4EF6\u8F83\u591A\u65F6\u53EF\u7528\u6761\u4EF6\u8868\uFF1B\u4E0D\u8981\u590D\u8FF0\u6570\u636E\u96C6\u3001\u8D85\u53C2\u6570\u548C\u4E8B\u5148\u9884\u671F" }),
+      observationsMarkdown: Type.String({
+        description: "\u5B9E\u9645\u89C2\u5BDF\uFF1A\u53EA\u653E\u56DE\u7B54\u672C\u8F6E\u95EE\u9898\u6240\u9700\u7684\u8BC1\u636E\uFF0C\u6570\u503C\u7ED3\u679C\u4F18\u5148\u7528\u56FE\u6216\u8868\u5C55\u793A\uFF0C\u6570\u5B66\u5173\u7CFB\u7528 LaTeX\uFF08\u884C\u5185 $...$\uFF0C\u72EC\u7ACB $$...$$\uFF09\u3002\u8868\u683C\u4F7F\u7528\u4E0A\u65B9\u4E09\u7EA7\u6807\u9898\u201C### \u8868 N\u3000\u6807\u9898\u201D\uFF1B\u56FE\u7247 caption \u4F7F\u7528\u201C\u56FE N\u3000\u6807\u9898\u201D\u3002\u6BCF\u4E2A\u8868\u683C\u3001\u56FE\u7247\u6216 checkpoint-chart \u540E\u5FC5\u987B\u5355\u72EC\u5199\u89E3\u6790\u6BB5\u843D\u5E76\u6DFB\u52A0 ---\u3002\u56FE\u7247\u76EE\u6807\u4F7F\u7528 artifacts \u4E2D\u7684\u9879\u76EE\u76F8\u5BF9\u8DEF\u5F84\u3002\u8F7B\u91CF\u56FE\u8868\u53EF\u4F7F\u7528 ```checkpoint-chart \u540E\u8DDF JSON\uFF0C\u5176 title \u5FC5\u987B\u662F\u201C\u56FE N\u3000\u6807\u9898\u201D\uFF1Bbar \u683C\u5F0F\u4E3A {type,title,items:[{label,value,color?}]}\uFF0Cline \u683C\u5F0F\u4E3A {type,title,series:[{name,color?,points:[{x,y}]}]}"
       }),
-      resultsMarkdown: Type.String({
-        description: "\u7ED3\u679C\u4E0E\u5206\u6790\u6B63\u6587\uFF0C\u4E5F\u662F\u5168\u6587\u4E3B\u4F53\u3002\u8868\u683C\u4F7F\u7528\u4E0A\u65B9\u4E09\u7EA7\u6807\u9898\u201C### \u8868 N\u3000\u6807\u9898\u201D\uFF1B\u56FE\u7247 caption \u4F7F\u7528\u201C\u56FE N\u3000\u6807\u9898\u201D\uFF0C\u7531 Viewer \u663E\u793A\u5728\u56FE\u4E0B\u65B9\u3002\u6BCF\u4E2A\u8868\u683C\u3001\u56FE\u7247\u6216 checkpoint-chart \u540E\u5FC5\u987B\u5355\u72EC\u5199\u89E3\u6790\u6BB5\u843D\u5E76\u6DFB\u52A0 ---\u3002\u56FE\u7247\u76EE\u6807\u4F7F\u7528 artifacts \u4E2D\u7684\u9879\u76EE\u76F8\u5BF9\u8DEF\u5F84\u3002\u8F7B\u91CF\u56FE\u8868\u53EF\u4F7F\u7528 ```checkpoint-chart \u540E\u8DDF JSON\uFF0C\u5176 title \u5FC5\u987B\u662F\u201C\u56FE N\u3000\u6807\u9898\u201D\uFF1Bbar \u683C\u5F0F\u4E3A {type,title,items:[{label,value,color?}]}\uFF0Cline \u683C\u5F0F\u4E3A {type,title,series:[{name,color?,points:[{x,y}]}]}"
-      }),
-      conclusionMarkdown: Type.String({
-        description: "\u7ED3\u8BBA\u4E0E\u4E0B\u4E00\u6B65\u6B63\u6587\uFF1A\u6700\u7EC8\u7ED3\u8BBA\u3001\u5173\u952E\u8BC1\u636E\u3001\u4E0D\u80FD\u8BC1\u660E\u7684\u5185\u5BB9\u3001\u4FDD\u5B88\u8868\u8FF0\u4EE5\u53CA\u80FD\u76F4\u63A5\u533A\u5206\u673A\u5236\u7684\u4E0B\u4E00\u5B9E\u9A8C"
-      }),
+      predictionOutcomes: Type.Array(
+        Type.Object({
+          outcome: StringEnum(["observed", "partial", "not-observed"]),
+          note: Type.String({ description: "\u5224\u65AD\u4F9D\u636E\uFF0C\u5F15\u7528\u5177\u4F53\u6570\u503C\u6216\u56FE\u8868\u7F16\u53F7" })
+        }),
+        { description: "\u6309\u987A\u5E8F\u9010\u6761\u5224\u65AD\u8FDB\u5165\u5B9E\u9A8C\u65F6\u767B\u8BB0\u7684\u9884\u671F" }
+      ),
+      judgmentMarkdown: Type.String({ description: "\u5BF9\u7167\u9884\u671F\u7684\u5224\u65AD\uFF1A\u89E3\u91CA\u5224\u65AD\u3001\u610F\u5916\u73B0\u8C61\uFF0C\u4EE5\u53CA\u672C\u7ED3\u679C\u4E0D\u80FD\u8BC1\u660E\u7684\u5185\u5BB9" }),
+      newQuestions: Type.Array(
+        Type.Object({
+          question: Type.String({ description: "\u65B0\u95EE\u9898\uFF0C\u4E00\u53E5\u8BDD" }),
+          whyItArose: Type.String({ description: "\u672C\u8F6E\u54EA\u4E2A\u73B0\u8C61\u8BA9\u8FD9\u4E2A\u95EE\u9898\u51FA\u73B0" }),
+          proposedExperiment: Type.String({ description: "\u80FD\u56DE\u7B54\u5B83\u7684\u4E0B\u4E00\u4E2A\u5B9E\u9A8C\uFF0C\u5305\u542B\u5173\u952E\u5BF9\u7167" }),
+          predictions: Type.Array(PREDICTION, { minItems: 2, maxItems: 4 })
+        }),
+        { maxItems: 3, description: "\u672C\u8F6E\u7ED3\u679C\u771F\u6B63\u5F15\u51FA\u7684\u65B0\u95EE\u9898\uFF1B\u6CA1\u6709\u65F6\u4F20\u7A7A\u6570\u7EC4" }
+      ),
+      revisionProposal: Type.Optional(Type.Object({
+        statement: Type.String({ description: "\u5EFA\u8BAE\u4FEE\u8BA2\u540E\u7684\u547D\u9898" }),
+        reason: Type.String({ description: "\u54EA\u4E9B\u8BC1\u636E\u8981\u6C42\u4FEE\u8BA2" })
+      }, { description: "\u4EC5\u5F53\u8BC1\u636E\u8981\u6C42\u6536\u7A84\u6216\u6539\u5199\u547D\u9898\u65F6\u586B\u5199\uFF1B\u7531\u7528\u6237\u51B3\u5B9A\u662F\u5426\u91C7\u7EB3" })),
       protocols: Type.Array(
         Type.Object({
           title: Type.String({ description: "Protocol/run label" }),
@@ -3647,6 +4426,8 @@ function registerResearchCheckpoint(pi, dependencies) {
       )
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const chain = await dependencies.prepareChain(params.newQuestions.length, ctx);
+      if (typeof chain === "string") return failure(chain);
       let artifacts;
       try {
         artifacts = await prepareCheckpointArtifacts(
@@ -3660,29 +4441,39 @@ function registerResearchCheckpoint(pi, dependencies) {
       const draft = {
         title: params.title,
         experimentId: params.experimentId,
-        shortConclusion: params.shortConclusion,
-        purposeMarkdown: params.purposeMarkdown,
-        setupMarkdown: params.setupMarkdown,
-        resultsMarkdown: params.resultsMarkdown,
-        conclusionMarkdown: params.conclusionMarkdown,
+        answer: params.answer,
+        verdict: params.verdict,
+        verdictReason: params.verdictReason,
+        whyMarkdown: params.whyMarkdown,
+        dataset: params.dataset,
+        keyHyperparameters: params.keyHyperparameters,
+        designMarkdown: params.designMarkdown,
+        observationsMarkdown: params.observationsMarkdown,
+        judgmentMarkdown: params.judgmentMarkdown,
+        predictionOutcomes: params.predictionOutcomes,
+        newQuestions: params.newQuestions,
+        revisionProposal: params.revisionProposal,
         protocols: params.protocols,
         reproduction: params.reproduction
       };
-      const validation = validateCheckpointDraft(draft, artifacts);
+      const validation = validateCheckpointDraft(draft, artifacts, chain.predictions.length);
       if (validation.errors.length) return failure(validation.errors.join("\n"));
       validation.warnings.forEach((warning) => ctx.ui.notify(warning, "warning"));
       let saved;
       try {
-        saved = await dependencies.save(draft, artifacts, ctx);
+        saved = await dependencies.save(draft, artifacts, chain, ctx);
       } catch (error) {
         return failure(`Checkpoint Markdown could not be saved: ${String(error)}`);
       }
       const portForwardCommand = saved.viewerUrl ? formatSshPortForwardCommand(saved.viewerUrl) : void 0;
-      dependencies.onReached(artifacts.length, ctx);
-      const details = { draft, artifacts, ...saved, portForwardCommand };
+      dependencies.onReached({ stored: saved.stored, draft, resultCount: artifacts.length }, ctx);
+      const details = { draft, chain, artifacts, ...saved, portForwardCommand };
+      const newQuestions = draft.newQuestions.map((item, index) => `  ${chain.newQuestionIds[index]} ${item.question}`);
       const lines = [
-        "\u2713 Experiment completed",
-        "\u2713 Checkpoint generated",
+        `\u2713 C${chain.sequence} answered ${chain.question.id}`,
+        `Answer: ${draft.answer}`,
+        `Proposition ${chain.proposition.id}: ${VERDICT_LABELS[draft.verdict]}`,
+        ...newQuestions.length ? ["New questions:", ...newQuestions] : [],
         "",
         `Saved: ${saved.stored.relativeMarkdownPath}`,
         saved.viewerUrl ? `
@@ -3709,22 +4500,22 @@ ${portForwardCommand}` : void 0
 }
 async function prepareCheckpointArtifacts(ctx, discovered, requested) {
   const prepared = [];
-  const projectRoot = resolve5(ctx.cwd);
+  const projectRoot = resolve6(ctx.cwd);
   const realProjectRoot = await realpath4(projectRoot);
   for (const item of requested ?? []) {
     const requestedPath = item.path.startsWith("@") ? item.path.slice(1) : item.path;
-    const requestedAbsolutePath = resolve5(projectRoot, requestedPath);
+    const requestedAbsolutePath = resolve6(projectRoot, requestedPath);
     if (requestedAbsolutePath !== projectRoot && !requestedAbsolutePath.startsWith(`${projectRoot}${sep5}`)) {
       throw new Error(`Artifact must stay inside the project: ${item.path}`);
     }
     const resolvedRecord = await resolveCheckpointArtifactRecord(ctx.cwd, requestedPath);
     if (!resolvedRecord) throw new Error(`Artifact does not exist or is not a file/dataset: ${item.path}`);
-    const absolutePath = resolve5(ctx.cwd, resolvedRecord.path);
+    const absolutePath = resolve6(ctx.cwd, resolvedRecord.path);
     const realArtifactPath = await realpath4(absolutePath);
     if (realArtifactPath !== realProjectRoot && !realArtifactPath.startsWith(`${realProjectRoot}${sep5}`)) {
       throw new Error(`Artifact must stay inside the project: ${item.path}`);
     }
-    const artifact = discovered.find((candidate) => resolve5(ctx.cwd, candidate.path) === absolutePath) ?? resolvedRecord;
+    const artifact = discovered.find((candidate) => resolve6(ctx.cwd, candidate.path) === absolutePath) ?? resolvedRecord;
     prepared.push({ ...item, artifact, absolutePath });
   }
   return prepared;
@@ -3732,7 +4523,7 @@ async function prepareCheckpointArtifacts(ctx, discovered, requested) {
 async function resolveCheckpointArtifactRecord(cwd, inputPath) {
   const known = await resolveArtifactRecord(cwd, inputPath);
   if (known) return known;
-  const absolutePath = resolve5(cwd, inputPath);
+  const absolutePath = resolve6(cwd, inputPath);
   try {
     const fileStat = await stat5(absolutePath);
     if (!fileStat.isFile()) return void 0;
@@ -3751,14 +4542,19 @@ async function resolveCheckpointArtifactRecord(cwd, inputPath) {
 }
 function renderCheckpointResult(details, theme, expanded) {
   const container = new Container();
-  container.addChild(new Text(theme.fg("success", theme.bold("\u2713 Experiment completed\n\u2713 Checkpoint generated")), 0, 0));
-  container.addChild(new Text(theme.bold(details.draft.title), 0, 1));
-  container.addChild(new Text(details.draft.shortConclusion, 0, 0));
+  const { chain, draft } = details;
+  container.addChild(new Text(theme.fg("success", theme.bold(`\u2713 C${chain.sequence} \xB7 ${chain.proposition.id} / ${chain.question.id}`)), 0, 0));
+  container.addChild(new Text(theme.bold(latexToUnicode(draft.title)), 0, 1));
+  container.addChild(new Text(`${theme.fg("muted", "\u7B54\u6848")} ${latexToUnicode(draft.answer)}`, 0, 0));
+  container.addChild(new Text(`${theme.fg("muted", "\u547D\u9898")} ${VERDICT_LABELS[draft.verdict]}\uFF1A${latexToUnicode(draft.verdictReason)}`, 0, 0));
+  draft.newQuestions.forEach((item, index) => {
+    container.addChild(new Text(`${theme.fg("accent", chain.newQuestionIds[index] ?? "Q")} ${latexToUnicode(item.question)}`, 0, 0));
+  });
   if (expanded) details.artifacts.filter((item) => item.role === "evidence" && checkpointImageMime(item.artifact.extension)).forEach((item) => {
     try {
       const data = readFileSync2(item.absolutePath).toString("base64");
-      container.addChild(new Text(`${theme.bold(item.title)}
-${item.description}`, 0, 1));
+      container.addChild(new Text(`${theme.bold(latexToUnicode(item.title))}
+${latexToUnicode(item.description)}`, 0, 1));
       container.addChild(
         createTerminalImage(
           data,
@@ -3817,12 +4613,11 @@ var REPO_FORMAT_PATTERN = /\b(?:prettier|eslint|biome)\b[^\n]*(?:--write\s+\.\b|
 var BROAD_LINT_PATTERN = /^\s*(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:lint|format)\s*$/i;
 var REPRO_MANIFEST_PATTERN = /\b(?:pip\s+freeze|conda\s+env\s+export|npm\s+shrinkwrap)\b/i;
 var REPRODUCTION_INTENT = /\b(?:please\s+)?(?:reproduce|replicate)\b|\b(?:run|execute)\b.{0,30}\b(?:official experiment|reference protocol|paper result|baseline)\b|(?:请|帮我|开始|继续|重新|运行|执行).{0,20}(?:复现|官方实验|论文实验|基准实验)/i;
-var REPRODUCTION_META_DISCUSSION = /\b(?:analy[sz]e|explain|discuss|review|policy|guard)\b.{0,50}\b(?:reproduc|replicat)|(?:分析|解释|讨论|修正|规则|策略|插件).{0,40}(?:复现|官方实验)|(?:复现|官方实验).{0,40}(?:问题|事故|坑|规则|策略)/i;
 var EXPLICIT_DIAGNOSTIC_REJECTION = /\b(?:do not|don't|never|without)\b.{0,30}\b(?:diagnostic|smoke test|small[- ]sample|subset)\b|(?:不要|禁止|不能|不允许).{0,20}(?:小样本|子集|抽样|缩小)/i;
 var EXPLICIT_DIAGNOSTIC_AUTHORIZATION = /\b(?:use|run|allow|approve|perform|start with)\b.{0,30}\b(?:diagnostic|smoke test|small[- ]sample|reduced subset|quick subset)\b|(?:允许|可以|先|只用|使用).{0,20}(?:小样本|子集|抽样|\d+\s*(?:条|个)?样本)/i;
-var SAMPLE_SCOPE_REDUCTION = /--(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*(?:=|\s)\s*\d+|\b(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|sample[_-]?count|dataset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*[:=]\s*\d+|\bhead\s+-n\s+\d+|\.select\s*\(\s*range\s*\(\s*\d+|\.take\s*\(\s*\d+|\[\s*:\s*\d+\s*\]/i;
-function evaluateResearchFidelity(toolName, input, userPrompt) {
-  if (!REPRODUCTION_INTENT.test(userPrompt) || REPRODUCTION_META_DISCUSSION.test(userPrompt) || !EXPLICIT_DIAGNOSTIC_REJECTION.test(userPrompt) && EXPLICIT_DIAGNOSTIC_AUTHORIZATION.test(userPrompt)) {
+var SAMPLE_SCOPE_REDUCTION = /--(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*(?:=|\s)\s*\d+|\b(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|sample[_-]?count|dataset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*[:=]\s*\d+|\bhead\s+-n\s+\d+[^|\n]*>|\.select\s*\(\s*range\s*\(\s*\d+|\.take\s*\(\s*\d+|\b(?:data|dataset|ds|samples|examples|records|rows|train|test|eval|val|valid|split|seeds)\w*\s*\[\s*:\s*\d+\s*\]/i;
+function evaluateResearchFidelity(toolName, input, userPrompt, experiment) {
+  if (experiment?.intent !== "reproduction" || !EXPLICIT_DIAGNOSTIC_REJECTION.test(userPrompt) && EXPLICIT_DIAGNOSTIC_AUTHORIZATION.test(userPrompt)) {
     return { block: false };
   }
   if (!/^(?:bash|edit|write)$/.test(toolName)) return { block: false };
@@ -3879,7 +4674,9 @@ var MODE_GUIDANCE = {
 function experimentGuidance(experiment) {
   const details = experiment ? [
     `Title: ${experiment.title}`,
-    `Question: ${experiment.question}`,
+    `Question${experiment.questionId ? ` ${experiment.questionId}` : ""}: ${experiment.question}`,
+    ...experiment.rationale ? [`Rationale: ${experiment.rationale}`] : [],
+    ...(experiment.predictions ?? []).map((prediction, index) => `Prediction ${index + 1}: if ${prediction.observation}, then ${prediction.implication}`),
     `Intent: ${experiment.intent}`,
     `Planned data: ${experiment.plannedDataScope}`,
     ...experiment.reference ? [`Reference: ${experiment.reference}`] : [],
@@ -3889,13 +4686,16 @@ function experimentGuidance(experiment) {
   return `Run the work needed to answer the experiment question and record what actually happened. Finish with research_checkpoint, or use research_abort_experiment only if no interpretable result was produced.${details ? `
 ${details}` : ""}${reproduction}`;
 }
-function researchPolicy(mode, _actions, _softReview, objective, experiment) {
+function researchPolicy(mode, actions, softReview, objective, experiment) {
   const guidance = mode === "experiment" ? experimentGuidance(experiment) : MODE_GUIDANCE[mode];
+  const review = mode === "experiment" && softReview ? `[SOFT REVIEW] ${actions} actions have run in this experiment. Before the next action, check whether the evidence already answers the question. If it does, finish with research_checkpoint now so the user can calibrate; otherwise take only the step that most directly answers it.` : void 0;
   return [
     `[RESEARCH LOOP: ${mode.toUpperCase()}]`,
     ...objective ? [`Objective: ${objective}`] : [],
     guidance,
-    "Start with the work or findings. Do not narrate Research Loop or mode changes unless the user needs to make a decision."
+    ...review ? [review] : [],
+    "Start with the work or findings. Do not narrate Research Loop or mode changes unless the user needs to make a decision.",
+    "Write every mathematical expression as LaTeX, inline $...$ and display $$...$$, in replies and in every research tool field, including propositions, questions, predictions and checkpoint titles and answers. Research Loop renders it in the Viewer and converts it for the terminal."
   ].join("\n");
 }
 
@@ -3928,6 +4728,9 @@ var ResearchCore = class {
   get lifecycleTransitionPending() {
     return this.terminalToolAccepted;
   }
+  get propositionId() {
+    return this.state.propositionId;
+  }
   get experiment() {
     return this.state.experiment ? cloneExperiment(this.state.experiment) : void 0;
   }
@@ -3955,6 +4758,9 @@ var ResearchCore = class {
     this.state.experiment = void 0;
     this.resetRound();
   }
+  setProposition(propositionId) {
+    this.state.propositionId = propositionId;
+  }
   enterMode(mode, objective, experiment) {
     if (!isWorkMode(mode)) return { block: true, reason: `Unknown Research Work Mode: ${String(mode)}.` };
     if (!this.state.enabled) return { block: true, reason: "Research Loop is off." };
@@ -3967,9 +4773,21 @@ var ResearchCore = class {
     if (mode === "experiment" && !experiment) {
       return { block: true, reason: "Experiment Mode requires a declared experiment plan." };
     }
+    if (mode === "experiment" && !this.state.propositionId) {
+      return {
+        block: true,
+        reason: "Experiment Mode requires an active proposition. Agree on the proposition with the user and record it with research_proposition first."
+      };
+    }
+    if (mode === "experiment" && (!experiment.questionId || (experiment.predictions?.length ?? 0) < 2)) {
+      return {
+        block: true,
+        reason: "Experiment Mode requires a questionId from the active proposition and at least two predictions registered before the run."
+      };
+    }
     this.state.workMode = mode;
     this.state.objective = objective;
-    this.state.experiment = mode === "experiment" ? cloneExperiment(experiment) : void 0;
+    this.state.experiment = mode === "experiment" ? { ...cloneExperiment(experiment), propositionId: this.state.propositionId } : void 0;
     if (mode === "experiment") this.addArtifactRoots(experiment.artifactRoots ?? []);
     this.resetRound();
     return { block: false };
@@ -4056,7 +4874,6 @@ var ResearchCore = class {
   evaluateToolCall(toolName, input) {
     if (!this.state.enabled) return void 0;
     const researchTool = identifyResearchTool(toolName);
-    if (researchTool === "research_state") return void 0;
     if (researchTool === "research_checkpoint") {
       if (this.state.workMode !== "experiment") {
         return { block: true, reason: "research_checkpoint is available only in Experiment Mode." };
@@ -4077,9 +4894,6 @@ var ResearchCore = class {
         };
       }
       return this.acceptTerminalTool("research_mode");
-    }
-    if (researchTool === "research_set_enabled") {
-      return this.acceptTerminalTool("research_set_enabled");
     }
     if (this.terminalToolAccepted) {
       return {
@@ -4102,7 +4916,7 @@ var ResearchCore = class {
         reason: `${displayMode(this.state.workMode)} cannot run empirical work. Declare an experiment and switch to Experiment Mode first.`
       };
     }
-    const fidelity = evaluateResearchFidelity(normalizedTool, input, this.currentUserPrompt);
+    const fidelity = evaluateResearchFidelity(normalizedTool, input, this.currentUserPrompt, this.state.experiment);
     if (fidelity.block) return fidelity;
     if (command) {
       const decision = evaluateResearchCommand(command, this.currentUserPrompt);
@@ -4155,6 +4969,7 @@ var ResearchCore = class {
     this.state = {
       enabled: state.enabled ?? false,
       workMode: mode,
+      propositionId: typeof state.propositionId === "string" ? state.propositionId : void 0,
       objective: state.objective,
       experiment: mode === "experiment" && state.experiment ? cloneExperiment(state.experiment) : void 0,
       artifactRoots: compactArtifactRoots(Array.isArray(state.artifactRoots) ? state.artifactRoots : []),
@@ -4216,13 +5031,7 @@ function displayMode(mode) {
   return mode.toUpperCase();
 }
 function identifyResearchTool(toolName) {
-  return [
-    "research_set_enabled",
-    "research_mode",
-    "research_checkpoint",
-    "research_abort_experiment",
-    "research_state"
-  ].find((name) => toolName === name || toolName.endsWith(`__${name}`));
+  return ["research_mode", "research_checkpoint", "research_abort_experiment"].find((name) => toolName === name);
 }
 function isShellTool(toolName) {
   return toolName === "bash" || toolName === "shell" || toolName === "exec";
@@ -4246,6 +5055,7 @@ function cloneState(state) {
 function cloneExperiment(experiment) {
   return {
     ...experiment,
+    predictions: experiment.predictions?.map((prediction) => ({ ...prediction })),
     artifactRoots: experiment.artifactRoots ? [...experiment.artifactRoots] : void 0
   };
 }
@@ -4263,15 +5073,15 @@ function nonNegativeInteger(value, fallback) {
 }
 
 // src/pi-status.ts
-function renderPiResearchStatus(snapshot, theme, userDecisionPending = false) {
-  const projection = projectPiStatus(snapshot, userDecisionPending);
+function renderPiResearchStatus(snapshot, theme, userDecisionPending = false, nextQuestionId) {
+  const projection = projectPiStatus(snapshot, userDecisionPending, nextQuestionId);
   const marker = theme.fg(projection.tone, projection.marker);
   const research = theme.fg(projection.enabled ? "accent" : "dim", "research");
   const mode = theme.fg(projection.tone, projection.mode);
   const details = projection.details.map((detail) => `${theme.fg("dim", " \xB7 ")}${theme.fg("text", detail)}`).join("");
   return `${marker} ${research}  ${mode}${details}`;
 }
-function projectPiStatus(snapshot, userDecisionPending = false) {
+function projectPiStatus(snapshot, userDecisionPending = false, nextQuestionId) {
   if (!snapshot.state.enabled) {
     return { marker: "\u25C7", mode: "off", details: [], tone: "dim", enabled: false };
   }
@@ -4288,7 +5098,7 @@ function projectPiStatus(snapshot, userDecisionPending = false) {
   const projection = {
     marker: mode === "experiment" ? "\u25C6" : "\u25C7",
     mode,
-    details: modeDetails(snapshot),
+    details: [...propositionDetails(snapshot, nextQuestionId), ...modeDetails(snapshot)],
     tone: modeTone(mode),
     enabled: true
   };
@@ -4301,6 +5111,12 @@ function projectPiStatus(snapshot, userDecisionPending = false) {
     projection.details.push("waiting for decision");
   }
   return projection;
+}
+function propositionDetails(snapshot, nextQuestionId) {
+  const propositionId = snapshot.state.propositionId;
+  if (!propositionId) return snapshot.state.enabled ? ["no proposition"] : [];
+  const questionId = snapshot.state.workMode === "experiment" ? snapshot.state.experiment?.questionId : nextQuestionId && `next ${nextQuestionId}`;
+  return [questionId ? `${propositionId} ${questionId}` : propositionId];
 }
 function modeDetails(snapshot) {
   switch (snapshot.state.workMode) {
@@ -4330,13 +5146,13 @@ function count(value, noun) {
 // src/runtime.ts
 var STATE_ENTRY = "research-loop-state";
 var POLICY_MESSAGE = "research-loop-policy";
-var RESEARCH_TOOLS = ["research_mode", "research_checkpoint", "research_abort_experiment"];
+var RESEARCH_TOOLS = ["research_mode", "research_proposition", "research_checkpoint", "research_abort_experiment"];
 var ASK_USER_QUESTION_TOOL = "ask_user_question";
 var STRUCTURED_DECISION_GUIDANCE = [
   "[RESEARCH DECISIONS]",
   "ask_user_question is available. Use it once, grouping related questions, when research cannot proceed without a concrete user decision.",
   "Use it for scientifically material protocol or scope choices, cost/scope trade-offs between alternatives, and branches between genuinely different next experiments.",
-  "Before a checkpoint, ask only when the user must choose the next branch; incorporate the answer into the checkpoint. Do not ask about routine, reversible choices or repeat an answered question.",
+  "Do not ask the user to choose the next question before a checkpoint: list the questions the result raised in research_checkpoint newQuestions, and Research Loop presents them to the user. Do not ask about routine, reversible choices or repeat an answered question.",
   "Governor approval dialogs authorize one exact action. If the user declines, stop and do not retry that action."
 ].join("\n");
 var PI_EXPERIMENT_CODE_GUIDANCE = [
@@ -4353,6 +5169,7 @@ var PI_EXPERIMENT_CODE_GUIDANCE = [
   "Separate model loading, data preparation, conditions, analysis, and plotting only when they are naturally distinct. Avoid factories, registries, strategy/context hierarchies, tiny wrapper chains, and reusable frameworks until multiple real experiments need them.",
   "Avoid broad defensive layers, retries, compatibility shims, silent recovery, repeated existence checks, and large try/except shells. Add only checks that prevent expensive wasted work or misleading results.",
   "Save scientific artifacts once under a stable predictable run directory and declare project-relative output directories in research_mode artifactRoots; Artifact Radar stays disabled when roots are omitted. Use names such as summary.json, per_seed.csv, per_layer.csv, figures/, predictions, activations, or checkpoints. Do not copy artifacts for checkpoint presentation and do not create display-only files.",
+  "For each main comparison the experiment is meant to answer, save one clearly labeled figure under the run's figures/ directory, with axis labels and units, a legend, and the compared conditions, so the checkpoint can show the evidence directly. Save the exact per-condition values as CSV alongside it.",
   "End the run with a compact Rich result table and a labeled list of exact saved paths so the researcher can judge the result and start the next iteration immediately."
 ].join("\n");
 function shouldAbortForCancelledQuestionnaire(toolName, details) {
@@ -4367,6 +5184,14 @@ var ResearchRuntime = class {
   core = new ResearchCore();
   blockedToolAttempts = /* @__PURE__ */ new Map();
   userDecisionPending = false;
+  propositionContext;
+  nextQuestionId;
+  get propositionId() {
+    return this.core.propositionId;
+  }
+  get selectedNextQuestionId() {
+    return this.nextQuestionId;
+  }
   get enabled() {
     return this.core.enabled;
   }
@@ -4388,6 +5213,8 @@ var ResearchRuntime = class {
   startSession(ctx) {
     this.blockedToolAttempts.clear();
     this.userDecisionPending = false;
+    this.propositionContext = void 0;
+    this.nextQuestionId = void 0;
     const latest = findLatestResearchState(ctx);
     const embeddedArtifacts = Boolean(latest && Object.hasOwn(latest, "artifacts"));
     const legacyArtifacts = embeddedArtifacts && Array.isArray(latest?.artifacts) ? latest.artifacts : [];
@@ -4405,9 +5232,25 @@ var ResearchRuntime = class {
     this.renderStatus(ctx);
     ctx.ui.notify(`Research Loop: ${enabled ? "ON" : "OFF"}`, "info");
   }
+  /** Activate a proposition; its summary is injected through setPropositionContext. */
+  setProposition(propositionId, ctx) {
+    if (this.core.propositionId === propositionId) return;
+    this.core.setProposition(propositionId);
+    this.nextQuestionId = void 0;
+    this.persist();
+    this.renderStatus(ctx);
+  }
+  setPropositionContext(context) {
+    this.propositionContext = context;
+  }
+  selectNextQuestion(questionId, ctx) {
+    this.nextQuestionId = questionId;
+    this.renderStatus(ctx);
+  }
   enterMode(mode, objective, experiment, ctx) {
     const decision = this.core.enterMode(mode, objective, experiment);
     if (decision.block) return decision;
+    if (mode === "experiment") this.nextQuestionId = void 0;
     this.blockedToolAttempts.clear();
     this.setToolAvailability();
     this.persist();
@@ -4456,6 +5299,7 @@ var ResearchRuntime = class {
     const policy = this.core.policy();
     if (!policy) return void 0;
     const guidance = [policy];
+    if (this.propositionContext) guidance.push(this.propositionContext);
     if (this.core.workMode === "experiment") guidance.push(PI_EXPERIMENT_CODE_GUIDANCE);
     if (this.pi.getActiveTools().includes(ASK_USER_QUESTION_TOOL)) guidance.push(STRUCTURED_DECISION_GUIDANCE);
     return guidance.join("\n");
@@ -4530,7 +5374,7 @@ var ResearchRuntime = class {
     ctx.ui.setWidget("research-loop-status", void 0);
     ctx.ui.setStatus(
       "research-loop",
-      renderPiResearchStatus(this.core.snapshot(false), ctx.ui.theme, this.userDecisionPending)
+      renderPiResearchStatus(this.core.snapshot(false), ctx.ui.theme, this.userDecisionPending, this.nextQuestionId)
     );
   }
   clearStatus(ctx) {
@@ -4550,6 +5394,8 @@ var ResearchRuntime = class {
     active.push("research_mode");
     if (this.core.workMode === "experiment") {
       active.push("research_checkpoint", "research_abort_experiment");
+    } else {
+      active.push("research_proposition");
     }
     this.pi.setActiveTools(active);
   }
@@ -4577,9 +5423,18 @@ ${serialized}`;
 
 // src/index.ts
 var ASK_USER_BLOCKED_EVENT = "rpiv:ask-user:blocked";
+var PREDICTION2 = Type2.Object({
+  observation: Type2.String({ description: "If this is observed (concrete, ideally with a direction or threshold)" }),
+  implication: Type2.String({ description: "then it means this for the question or proposition" })
+});
+function resultText(result) {
+  return result.content.map((part) => part.type === "text" ? part.text ?? "" : "").join("\n");
+}
 function researchLoop(pi) {
   const runtime = new ResearchRuntime(pi);
   let checkpointStore;
+  let propositionStore;
+  let pendingHandoff;
   let checkpointServer;
   let radar;
   let activeContext;
@@ -4708,6 +5563,120 @@ function researchLoop(pi) {
       "warning"
     );
   };
+  const stores = (ctx) => {
+    checkpointStore ??= new CheckpointStore(ctx.cwd);
+    propositionStore ??= new PropositionStore(checkpointStore);
+    return { checkpoints: checkpointStore, propositions: propositionStore };
+  };
+  const refreshPropositionContext = async (ctx) => {
+    const propositionId = runtime.propositionId;
+    const tree = propositionId ? await stores(ctx).propositions.tree(propositionId) : void 0;
+    runtime.setPropositionContext(describePropositionForPolicy(tree, runtime.selectedNextQuestionId));
+  };
+  const activateLatestProposition = async (ctx) => {
+    if (!runtime.propositionId) {
+      const latest = await stores(ctx).propositions.latest();
+      if (latest) {
+        runtime.setProposition(latest.id, ctx);
+        ctx.ui.notify(`Research proposition ${latest.id}: ${latexToUnicode(latest.statement)}`, "info");
+      }
+    }
+    await refreshPropositionContext(ctx);
+  };
+  const resolveExperiment = async (params, ctx) => {
+    const missing = ["title", "questionId", "rationale", "intent", "plannedDataScope"].filter((field) => !params[field]?.trim());
+    if ((params.predictions?.length ?? 0) < 2) missing.push("predictions (at least 2)");
+    if (missing.length) return `Experiment Mode requires: ${missing.join(", ")}.`;
+    const propositionId = runtime.propositionId;
+    if (!propositionId) {
+      return "Experiment Mode requires an active proposition. Agree on it with the user and record it with research_proposition action=create first.";
+    }
+    const tree = await stores(ctx).propositions.tree(propositionId);
+    if (!tree) return `Active proposition ${propositionId} was not found under checkpoints/propositions.`;
+    const question = tree.questions.find((item) => item.id === params.questionId.trim());
+    if (!question) {
+      const open3 = tree.questions.filter((item) => item.status === "open").map((item) => item.id);
+      return `${params.questionId} is not registered under ${propositionId}. Open questions: ${open3.join(", ") || "none"}. Register a new question with research_proposition action=add_question first.`;
+    }
+    return {
+      title: params.title,
+      propositionId,
+      questionId: question.id,
+      question: question.question,
+      rationale: params.rationale,
+      predictions: params.predictions,
+      intent: params.intent,
+      plannedDataScope: params.plannedDataScope,
+      reference: params.reference,
+      artifactRoots: normalizeArtifactRoots(ctx.cwd, params.artifactRoots ?? [])
+    };
+  };
+  const runHandoff = async (handoff, ctx) => {
+    const { propositions } = stores(ctx);
+    let revision = handoff.revisionProposal;
+    const chooseQuestion = async (statement, question) => {
+      runtime.selectNextQuestion(question.id, ctx);
+      await refreshPropositionContext(ctx);
+      const prefill = [
+        `\u7EE7\u7EED\u9A8C\u8BC1\u547D\u9898 ${handoff.propositionId}\uFF1A${statement}`,
+        `\u4E0B\u4E00\u6B65\u95EE\u9898 ${question.id}\uFF1A${question.question}`,
+        question.proposed_experiment ? `\u5EFA\u8BAE\u5B9E\u9A8C\uFF1A${question.proposed_experiment}` : void 0,
+        "\u8BF7\u636E\u6B64\u8BBE\u8BA1\u5B9E\u9A8C\uFF0C\u767B\u8BB0\u4E8B\u5148\u9884\u671F\u540E\u8FDB\u5165 Experiment Mode\u3002"
+      ].filter((line) => Boolean(line)).join("\n");
+      const message = await ctx.ui.editor("\u4E0B\u4E00\u8F6E\u6307\u4EE4\uFF08\u53EF\u4FEE\u6539\u540E\u63D0\u4EA4\uFF1B\u53D6\u6D88\u5219\u53EA\u8BB0\u5F55\u9009\u62E9\uFF09", prefill);
+      if (message?.trim() && handoff.generation === sessionGeneration) pi.sendUserMessage(message.trim());
+    };
+    while (handoff.generation === sessionGeneration) {
+      const tree = await propositions.tree(handoff.propositionId);
+      if (!tree) return;
+      const raised = new Set(handoff.newQuestionIds);
+      const open3 = tree.questions.filter((item) => item.status === "open");
+      const ordered = [...open3.filter((item) => raised.has(item.id)), ...open3.filter((item) => !raised.has(item.id))];
+      const choices = /* @__PURE__ */ new Map();
+      ordered.forEach((question) => {
+        choices.set(`${question.id}\u3000${latexToUnicode(question.question)}${raised.has(question.id) ? "\uFF08\u672C\u8F6E\u65B0\u95EE\u9898\uFF09" : ""}`, async () => {
+          await chooseQuestion(tree.proposition.statement, question);
+          return true;
+        });
+      });
+      const proposed = revision;
+      if (proposed) {
+        choices.set(`\u91C7\u7EB3\u547D\u9898\u4FEE\u8BA2\uFF1A${latexToUnicode(proposed.statement)}`, async () => {
+          const approved = await ctx.ui.confirm(
+            `\u4FEE\u8BA2\u547D\u9898 ${tree.proposition.id}\uFF1F`,
+            latexToUnicode(`\u539F\u547D\u9898\uFF1A${tree.proposition.statement}
+\u4FEE\u8BA2\u4E3A\uFF1A${proposed.statement}
+\u7406\u7531\uFF1A${proposed.reason}`)
+          );
+          if (approved) {
+            await propositions.revise(tree.proposition.id, proposed.statement, proposed.reason);
+            await refreshPropositionContext(ctx);
+            ctx.ui.notify(`\u547D\u9898 ${tree.proposition.id} \u5DF2\u4FEE\u8BA2\u3002`, "info");
+          }
+          revision = void 0;
+          return false;
+        });
+      }
+      choices.set("\u63D0\u51FA\u65B0\u7684\u95EE\u9898\u2026", async () => {
+        const text = await ctx.ui.input("\u65B0\u95EE\u9898", "\u4E00\u53E5\u8BDD\u63CF\u8FF0\u4E0B\u4E00\u6B65\u8981\u9A8C\u8BC1\u7684\u95EE\u9898");
+        if (!text?.trim()) return false;
+        const question = await propositions.addQuestion(
+          tree.proposition.id,
+          text,
+          `\u7528\u6237\u5728 C${handoff.sequence} \u4E4B\u540E\u63D0\u51FA\u3002`,
+          "user"
+        );
+        await chooseQuestion(tree.proposition.statement, question);
+        return true;
+      });
+      choices.set("\u6682\u4E0D\u51B3\u5B9A", async () => true);
+      const picked = await ctx.ui.select(
+        `C${handoff.sequence} \u5DF2\u5B8C\u6210 \xB7 \u547D\u9898 ${tree.proposition.id}\uFF1A\u4E0B\u4E00\u6B65\u9A8C\u8BC1\u54EA\u4E2A\u95EE\u9898\uFF1F`,
+        [...choices.keys()]
+      );
+      if (!picked || await choices.get(picked)()) return;
+    }
+  };
   const startCheckpointViewer = async (ctx) => {
     checkpointStore ??= new CheckpointStore(ctx.cwd);
     checkpointServer ??= new CheckpointViewerServer(checkpointStore);
@@ -4717,9 +5686,32 @@ function researchLoop(pi) {
   };
   registerResearchCheckpoint(pi, {
     getArtifacts,
-    async save(draft, artifacts, ctx) {
-      checkpointStore ??= new CheckpointStore(ctx.cwd);
-      const stored = await checkpointStore.write(draft, artifacts);
+    async prepareChain(newQuestionCount, ctx) {
+      const experiment = runtime.experiment;
+      if (!experiment?.propositionId || !experiment.questionId || !experiment.predictions?.length) {
+        return "This experiment was started without a proposition question, so it cannot be linked into a checkpoint chain. Ask the user to end it with /research off and restart it under a proposition.";
+      }
+      const tree = await stores(ctx).propositions.tree(experiment.propositionId);
+      if (!tree) return `Proposition ${experiment.propositionId} was not found under checkpoints/propositions.`;
+      const question = tree.questions.find((item) => item.id === experiment.questionId);
+      if (!question) return `Question ${experiment.questionId} is no longer registered under ${experiment.propositionId}.`;
+      const raisedBy = tree.checkpoints.find((checkpoint) => checkpoint.id === question.raised_by);
+      const firstQuestion = nextQuestionNumber(tree);
+      return {
+        proposition: { id: tree.proposition.id, statement: tree.proposition.statement },
+        question: { id: question.id, question: question.question, origin: question.origin },
+        path: questionPath(tree, question.id).map((step) => ({
+          questionId: step.question.id,
+          via: step.via && { sequence: step.via.sequence, answer: step.via.answer }
+        })),
+        raisedBy: raisedBy && { sequence: raisedBy.sequence, title: raisedBy.title },
+        predictions: experiment.predictions,
+        sequence: nextCheckpointSequence(tree),
+        newQuestionIds: Array.from({ length: newQuestionCount }, (_2, index) => `Q${firstQuestion + index}`)
+      };
+    },
+    async save(draft, artifacts, chain, ctx) {
+      const stored = await stores(ctx).checkpoints.write(draft, artifacts, chain);
       const registeredRoots = normalizeArtifactRoots(
         ctx.cwd,
         artifacts.map((item) => inferArtifactRoot(item.artifact))
@@ -4733,21 +5725,38 @@ function researchLoop(pi) {
         return { stored };
       }
     },
-    onReached: (resultCount, ctx) => {
+    onReached: ({ stored, draft, resultCount }, ctx) => {
       runtime.reachCheckpoint(resultCount, ctx);
       markArtifactRootsPersisted();
       void syncRadar(ctx);
+      void refreshPropositionContext(ctx);
+      const { proposition_id: propositionId, sequence } = stored.metadata;
+      if (propositionId && sequence) {
+        pendingHandoff = {
+          generation: sessionGeneration,
+          propositionId,
+          sequence,
+          newQuestionIds: (stored.metadata.new_questions ?? []).map((item) => item.id),
+          revisionProposal: draft.revisionProposal
+        };
+      }
     }
   });
   pi.registerTool({
     name: "research_mode",
     label: "Research Work Mode",
-    description: "Set the current Research Loop mode. Use Brainstorming to compare options, Exploration to read and understand code or materials, and Experiment before empirical execution. Disable Research Loop for ordinary implementation work. Call this alone, then proceed with the work.",
+    description: "Set the current Research Loop mode. Use Brainstorming to compare options, Exploration to read and understand code or materials, and Experiment before empirical execution. Experiment Mode answers one registered question of the active proposition and requires predictions registered before the run. Disable Research Loop for ordinary implementation work. Call this alone, then proceed with the work.",
     parameters: Type2.Object({
       mode: StringEnum2(["brainstorming", "exploration", "experiment"]),
       objective: Type2.String({ description: "Current objective that justifies this mode" }),
       title: Type2.Optional(Type2.String({ description: "Experiment phase title; required for Experiment Mode" })),
-      question: Type2.Optional(Type2.String({ description: "Research Question; required for Experiment Mode" })),
+      questionId: Type2.Optional(Type2.String({ description: "Registered question of the active proposition, such as Q3; required for Experiment Mode" })),
+      rationale: Type2.Optional(Type2.String({ description: "Why this experiment can answer the question; required for Experiment Mode" })),
+      predictions: Type2.Optional(Type2.Array(PREDICTION2, {
+        minItems: 2,
+        maxItems: 4,
+        description: "Outcomes predicted before the run, covering supporting and non-supporting results; copied verbatim into the checkpoint. Required for Experiment Mode"
+      })),
       intent: Type2.Optional(
         StringEnum2(["reproduction", "diagnostic", "exploratory", "ablation"], {
           description: "Scientific intent; required for Experiment Mode"
@@ -4763,23 +5772,127 @@ function researchLoop(pi) {
       ))
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const experiment = params.mode === "experiment" && params.title && params.question && params.intent && params.plannedDataScope ? {
-        title: params.title,
-        question: params.question,
-        intent: params.intent,
-        plannedDataScope: params.plannedDataScope,
-        reference: params.reference,
-        artifactRoots: normalizeArtifactRoots(ctx.cwd, params.artifactRoots ?? [])
-      } : void 0;
+      let experiment;
+      if (params.mode === "experiment") {
+        const resolved = await resolveExperiment(params, ctx);
+        if (typeof resolved === "string") {
+          return { content: [{ type: "text", text: resolved }], details: { accepted: false, mode: params.mode } };
+        }
+        experiment = resolved;
+      }
       const decision = runtime.enterMode(params.mode, params.objective, experiment, ctx);
-      if (!decision.block) await syncRadar(ctx);
-      const text = decision.block ? decision.reason ?? "Mode transition rejected." : `Research Work Mode: ${params.mode.toUpperCase()}
-Objective: ${params.objective}`;
+      if (!decision.block) {
+        await syncRadar(ctx);
+        await refreshPropositionContext(ctx);
+      }
+      const text = decision.block ? decision.reason ?? "Mode transition rejected." : [
+        `Research Work Mode: ${params.mode.toUpperCase()}`,
+        `Objective: ${params.objective}`,
+        ...experiment ? [`Question ${experiment.questionId}: ${experiment.question}`] : []
+      ].join("\n");
       return { content: [{ type: "text", text }], details: { accepted: !decision.block, mode: params.mode } };
     },
     renderCall(args, theme) {
       const mode = args.mode?.toUpperCase() ?? "MODE";
       return new Text2(theme.fg("toolTitle", theme.bold(`Research ${mode}`)), 0, 0);
+    },
+    renderResult(result) {
+      return new Text2(latexToUnicode(resultText(result)), 0, 0);
+    }
+  });
+  pi.registerTool({
+    name: "research_proposition",
+    label: "Research Proposition",
+    description: "Manage the proposition that experiments test. create records a falsifiable proposition with 1-5 initial questions; revise restates it; both require the user's confirmation. add_question registers another question before experimenting on it. activate switches to an existing proposition. Not available in Experiment Mode.",
+    parameters: Type2.Object({
+      action: StringEnum2(["create", "revise", "add_question", "activate"]),
+      propositionId: Type2.Optional(Type2.String({ description: "Target proposition such as P2; defaults to the active proposition" })),
+      statement: Type2.Optional(Type2.String({ description: "create/revise: the proposition as one falsifiable sentence" })),
+      background: Type2.Optional(Type2.String({ description: "create: the observation or motivation behind the proposition" })),
+      questions: Type2.Optional(Type2.Array(
+        Type2.Object({
+          question: Type2.String({ description: "One question whose answer bears on the proposition" }),
+          rationale: Type2.String({ description: "Why answering it tests the proposition" })
+        }),
+        { minItems: 1, maxItems: 5, description: "create: initial decomposition of the proposition" }
+      )),
+      reason: Type2.Optional(Type2.String({ description: "revise: the evidence that requires the revision" })),
+      question: Type2.Optional(Type2.String({ description: "add_question: the question" })),
+      rationale: Type2.Optional(Type2.String({ description: "add_question: why it bears on the proposition" }))
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const reply = (text, accepted) => ({
+        content: [{ type: "text", text }],
+        details: { accepted, action: params.action }
+      });
+      if (runtime.workMode === "experiment") {
+        return reply("Finish the experiment with research_checkpoint before changing propositions.", false);
+      }
+      const { propositions } = stores(ctx);
+      const confirm = async (title, message) => {
+        if (!ctx.hasUI) return false;
+        runtime.setUserDecisionPending(true, ctx);
+        try {
+          return await ctx.ui.confirm(title, message);
+        } catch {
+          return false;
+        } finally {
+          runtime.setUserDecisionPending(false, ctx);
+        }
+      };
+      const declined = (what) => {
+        ctx.abort();
+        return reply(`The user did not confirm the ${what}. The turn was stopped; do not retry. Ask the user what should change.`, false);
+      };
+      if (params.action === "create") {
+        const questions = params.questions ?? [];
+        if (!params.statement?.trim() || questions.length === 0) {
+          return reply("create requires statement and at least one initial question.", false);
+        }
+        const summary = [
+          `\u547D\u9898\uFF1A${params.statement.trim()}`,
+          ...params.background?.trim() ? [`\u80CC\u666F\uFF1A${params.background.trim()}`] : [],
+          "",
+          ...questions.map((item, index) => `Q${index + 1}\u3000${item.question}\uFF1A${item.rationale}`)
+        ].join("\n");
+        if (!await confirm("\u5EFA\u7ACB\u7814\u7A76\u547D\u9898\uFF1F", latexToUnicode(summary))) return declined("proposition");
+        const record2 = await propositions.create({ statement: params.statement, background: params.background, questions });
+        runtime.setProposition(record2.id, ctx);
+        await refreshPropositionContext(ctx);
+        return reply(`Proposition ${record2.id} recorded and active.
+${record2.questions.map((item) => `${item.id}: ${item.question}`).join("\n")}`, true);
+      }
+      const propositionId = params.propositionId?.trim() || runtime.propositionId;
+      const record = propositionId ? await propositions.find(propositionId) : void 0;
+      if (!record) return reply(`Proposition ${propositionId ?? "(none active)"} was not found.`, false);
+      if (params.action === "activate") {
+        runtime.setProposition(record.id, ctx);
+        await refreshPropositionContext(ctx);
+        return reply(`Proposition ${record.id} is active: ${record.statement}`, true);
+      }
+      if (params.action === "revise") {
+        if (!params.statement?.trim() || !params.reason?.trim()) return reply("revise requires statement and reason.", false);
+        const message = `\u539F\u547D\u9898\uFF1A${record.statement}
+\u4FEE\u8BA2\u4E3A\uFF1A${params.statement.trim()}
+\u7406\u7531\uFF1A${params.reason.trim()}`;
+        if (!await confirm(`\u4FEE\u8BA2\u547D\u9898 ${record.id}\uFF1F`, latexToUnicode(message))) return declined("revision");
+        await propositions.revise(record.id, params.statement, params.reason);
+        await refreshPropositionContext(ctx);
+        return reply(`Proposition ${record.id} revised.`, true);
+      }
+      if (!params.question?.trim() || !params.rationale?.trim()) {
+        return reply("add_question requires question and rationale.", false);
+      }
+      const added = await propositions.addQuestion(record.id, params.question, params.rationale, "agent");
+      await refreshPropositionContext(ctx);
+      return reply(`Registered ${added.id} under ${record.id}: ${added.question}`, true);
+    },
+    renderCall(args, theme) {
+      const action = args.action ?? "proposition";
+      return new Text2(theme.fg("toolTitle", theme.bold(`Research Proposition \xB7 ${action}`)), 0, 0);
+    },
+    renderResult(result) {
+      return new Text2(latexToUnicode(resultText(result)), 0, 0);
     }
   });
   pi.registerTool({
@@ -4818,9 +5931,34 @@ Objective: ${params.objective}`;
         runtime.setEnabled(value === "on", ctx);
         markArtifactRootsPersisted();
         await syncRadar(ctx);
+        if (value === "on") await activateLatestProposition(ctx);
         return;
       }
       ctx.ui.notify(`Research Loop: ${runtime.enabled ? "ON" : "OFF"}. Usage: /research on|off`, "info");
+    }
+  });
+  pi.registerCommand("proposition", {
+    description: "Show or switch the active research proposition",
+    handler: async (_args, ctx) => {
+      const records = await stores(ctx).propositions.list();
+      if (records.length === 0) {
+        ctx.ui.notify("No propositions yet. Describe the proposition to the agent with Research Loop on.", "info");
+        return;
+      }
+      const labels = records.map((record2) => `${record2.id}\u3000${latexToUnicode(record2.statement)}${record2.id === runtime.propositionId ? "\uFF08\u5F53\u524D\uFF09" : ""}`);
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify(labels.join("\n"), "info");
+        return;
+      }
+      if (runtime.workMode === "experiment") {
+        ctx.ui.notify(labels.join("\n"), "info");
+        return;
+      }
+      const selected = await ctx.ui.select("Research propositions", labels);
+      const record = records[labels.indexOf(selected ?? "")];
+      if (!record) return;
+      runtime.setProposition(record.id, ctx);
+      await refreshPropositionContext(ctx);
     }
   });
   pi.registerCommand("artifacts", {
@@ -4913,9 +6051,13 @@ Objective: ${params.objective}`;
     const controlStateChanged = runtime.setArtifactRoots(sanitizedRoots, sanitizedCurrentRoots, false);
     if (restored.embeddedArtifacts || controlStateChanged) runtime.persistControlState();
     checkpointStore = void 0;
+    propositionStore = void 0;
     checkpointServer = void 0;
+    pendingHandoff = void 0;
     setImmediate(() => {
       void (async () => {
+        if (!isCurrentSession(ctx, generation, controller.signal)) return;
+        if (runtime.enabled) await activateLatestProposition(ctx);
         if (!isCurrentSession(ctx, generation, controller.signal)) return;
         if (restored.embeddedArtifacts) {
           const sanitizedArtifacts = [];
@@ -4963,6 +6105,18 @@ Objective: ${params.objective}`;
     await checkpointServer?.stop();
     checkpointServer = void 0;
     checkpointStore = void 0;
+    propositionStore = void 0;
+    pendingHandoff = void 0;
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    const handoff = pendingHandoff;
+    pendingHandoff = void 0;
+    if (!handoff || handoff.generation !== sessionGeneration || !ctx.hasUI || !runtime.enabled) return;
+    try {
+      await runHandoff(handoff, ctx);
+    } catch (error) {
+      ctx.ui.notify(`Research handoff failed: ${String(error)}`, "warning");
+    }
   });
   pi.on("before_agent_start", (event, ctx) => {
     runtime.resetRequest(event.prompt, ctx);

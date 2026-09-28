@@ -64,6 +64,10 @@ export class ResearchCore {
     return this.terminalToolAccepted;
   }
 
+  get propositionId(): string | undefined {
+    return this.state.propositionId;
+  }
+
   get experiment(): ExperimentContext | undefined {
     return this.state.experiment ? cloneExperiment(this.state.experiment) : undefined;
   }
@@ -97,6 +101,10 @@ export class ResearchCore {
     this.resetRound();
   }
 
+  setProposition(propositionId: string | undefined): void {
+    this.state.propositionId = propositionId;
+  }
+
   enterMode(mode: WorkMode, objective: string, experiment?: ExperimentContext): GateDecision {
     if (!isWorkMode(mode)) return { block: true, reason: `Unknown Research Work Mode: ${String(mode)}.` };
     if (!this.state.enabled) return { block: true, reason: "Research Loop is off." };
@@ -109,10 +117,24 @@ export class ResearchCore {
     if (mode === "experiment" && !experiment) {
       return { block: true, reason: "Experiment Mode requires a declared experiment plan." };
     }
+    if (mode === "experiment" && !this.state.propositionId) {
+      return {
+        block: true,
+        reason: "Experiment Mode requires an active proposition. Agree on the proposition with the user and record it with research_proposition first.",
+      };
+    }
+    if (mode === "experiment" && (!experiment!.questionId || (experiment!.predictions?.length ?? 0) < 2)) {
+      return {
+        block: true,
+        reason: "Experiment Mode requires a questionId from the active proposition and at least two predictions registered before the run.",
+      };
+    }
 
     this.state.workMode = mode;
     this.state.objective = objective;
-    this.state.experiment = mode === "experiment" ? cloneExperiment(experiment!) : undefined;
+    this.state.experiment = mode === "experiment"
+      ? { ...cloneExperiment(experiment!), propositionId: this.state.propositionId }
+      : undefined;
     if (mode === "experiment") this.addArtifactRoots(experiment!.artifactRoots ?? []);
     this.resetRound();
     return { block: false };
@@ -217,7 +239,6 @@ export class ResearchCore {
     if (!this.state.enabled) return undefined;
 
     const researchTool = identifyResearchTool(toolName);
-    if (researchTool === "research_state") return undefined;
     if (researchTool === "research_checkpoint") {
       if (this.state.workMode !== "experiment") {
         return { block: true, reason: "research_checkpoint is available only in Experiment Mode." };
@@ -238,9 +259,6 @@ export class ResearchCore {
         };
       }
       return this.acceptTerminalTool("research_mode");
-    }
-    if (researchTool === "research_set_enabled") {
-      return this.acceptTerminalTool("research_set_enabled");
     }
     if (this.terminalToolAccepted) {
       return {
@@ -273,7 +291,7 @@ export class ResearchCore {
       };
     }
 
-    const fidelity = evaluateResearchFidelity(normalizedTool, input, this.currentUserPrompt);
+    const fidelity = evaluateResearchFidelity(normalizedTool, input, this.currentUserPrompt, this.state.experiment);
     if (fidelity.block) return fidelity;
     if (command) {
       const decision = evaluateResearchCommand(command, this.currentUserPrompt);
@@ -336,6 +354,7 @@ export class ResearchCore {
     this.state = {
       enabled: state.enabled ?? false,
       workMode: mode,
+      propositionId: typeof state.propositionId === "string" ? state.propositionId : undefined,
       objective: state.objective,
       experiment: mode === "experiment" && state.experiment ? cloneExperiment(state.experiment) : undefined,
       artifactRoots: compactArtifactRoots(Array.isArray(state.artifactRoots) ? state.artifactRoots : []),
@@ -407,13 +426,8 @@ export function displayMode(mode: WorkMode): string {
 }
 
 function identifyResearchTool(toolName: string): string | undefined {
-  return [
-    "research_set_enabled",
-    "research_mode",
-    "research_checkpoint",
-    "research_abort_experiment",
-    "research_state",
-  ].find((name) => toolName === name || toolName.endsWith(`__${name}`));
+  return ["research_mode", "research_checkpoint", "research_abort_experiment"]
+    .find((name) => toolName === name);
 }
 
 function isShellTool(toolName: string): boolean {
@@ -442,6 +456,7 @@ function cloneState(state: ResearchState): ResearchState {
 function cloneExperiment(experiment: ExperimentContext): ExperimentContext {
   return {
     ...experiment,
+    predictions: experiment.predictions?.map((prediction) => ({ ...prediction })),
     artifactRoots: experiment.artifactRoots ? [...experiment.artifactRoots] : undefined,
   };
 }

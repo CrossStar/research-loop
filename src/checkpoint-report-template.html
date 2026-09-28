@@ -285,6 +285,33 @@
     .history-title:hover { color: var(--accent); text-decoration: underline; }
     .history-conclusion { margin-top: 4px; color: var(--muted); font-size: 15px; }
 
+    .proposition-list { list-style: none; margin: 0 0 12px; padding: 0; }
+    .proposition-item { padding: 16px 0; border-bottom: 1px solid var(--rule); }
+    .proposition-item a { color: var(--strong); font-size: 19px; text-decoration: none; }
+    .proposition-item a:hover { color: var(--accent); text-decoration: underline; }
+    .proposition-stats { margin-top: 4px; color: var(--muted); font-size: 14px; }
+    .proposition-statement { max-width: 860px; margin: 0 auto 14px !important; color: var(--strong) !important; font-size: 22px; line-height: 1.5; }
+    .proposition-background { max-width: 820px; margin: 0 auto 12px !important; text-align: left; }
+    .question-tree, .question-tree ol { list-style: none; margin: 0; padding: 0; }
+    .question-tree ol { margin: 12px 0 0 22px; padding-left: 18px; border-left: 1px solid var(--rule); }
+    .question-node { margin: 0 0 20px; }
+    .question-head { color: var(--strong); font-size: 18px; line-height: 1.45; }
+    .question-id, .checkpoint-seq { display: inline-block; min-width: 36px; margin-right: 8px; color: var(--accent); font: 13px var(--font-mono); }
+    .question-origin, .question-proposal { margin: 3px 0 0 44px; color: var(--muted); font-size: 14.5px; }
+    .question-node.open > .question-head::after { content: "待验证"; margin-left: 10px; padding: 0 6px; color: var(--amber); border: 1px solid var(--amber); font-size: 12px; }
+    .checkpoint-node { margin: 10px 0 0; }
+    .checkpoint-node > a { color: var(--strong); text-decoration: none; }
+    .checkpoint-node > a:hover { color: var(--accent); text-decoration: underline; }
+    .checkpoint-answer { margin: 2px 0 0 44px; color: var(--ink); font-size: 15px; }
+    .verdict { margin-left: 8px; padding: 0 6px; border: 1px solid currentColor; font-size: 12px; white-space: nowrap; }
+    .verdict-supports { color: var(--green); }
+    .verdict-weakens { color: var(--amber); }
+    .verdict-refutes { color: var(--red); }
+    .verdict-inconclusive { color: var(--faint); }
+    .revision-list { margin: 0; padding-left: 22px; color: var(--muted); font-size: 15px; }
+    .reproduction-details { margin-top: 58px; }
+    .reproduction-details > summary { color: var(--strong); cursor: pointer; font-size: 22px; }
+
     dialog { width: min(1200px, calc(100vw - 40px)); padding: 0; border: 1px solid #777; background: #fff; }
     dialog::backdrop { background: rgba(20,20,18,.7); backdrop-filter: blur(2px); }
     .dialog-head { display: flex; justify-content: space-between; padding: 9px 13px; border-bottom: 1px solid var(--rule); }
@@ -345,7 +372,7 @@
         <div class="brand-title">Checkpoint Viewer</div>
         <div class="brand-subtitle">Research notes in this project</div>
       </div>
-      <nav class="viewer-links"><a href="/latest">最新</a><a href="/">历史</a></nav>
+      <nav class="viewer-links"><a href="/latest">最新</a><a href="/">命题与历史</a></nav>
       <div class="side-heading" id="toc-heading">Contents</div>
       <nav class="side-nav" id="toc-nav"></nav>
       <div class="side-heading">Recent checkpoints</div>
@@ -368,6 +395,13 @@
     const tocHeading = document.getElementById("toc-heading");
     const imageDialog = document.getElementById("image-dialog");
     const escapeHtml = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+    // *_html fields arrive escaped from the server with TeX already in MathJax delimiters.
+    const mathHtml = (html, text) => html ?? escapeHtml(text ?? "");
+    const sidebar = document.querySelector(".sidebar");
+    const typesetMath = () => {
+      if (window.MathJax?.typesetPromise) window.MathJax.typesetPromise([content, sidebar]).catch(() => {});
+      else window.MathJax?.startup?.promise?.then(typesetMath).catch(() => {});
+    };
 
     async function requestJson(url) {
       const response = await fetch(url, { cache: "no-store" });
@@ -382,37 +416,48 @@
         const history = await requestJson("/api/checkpoints");
         renderRecent(history);
         const path = location.pathname;
-        if (path === "/" || path === "") renderHistory(history);
-        else {
+        if (path === "/" || path === "") renderHistory(history, await requestJson("/api/propositions"));
+        else if (path.startsWith("/propositions/")) {
+          renderProposition(await requestJson(`/api${path}`));
+        } else {
           const endpoint = path === "/latest"
             ? "/api/latest"
             : `/api/checkpoints/${encodeURIComponent(decodeURIComponent(path.slice("/checkpoints/".length)))}`;
           renderCheckpoint(await requestJson(endpoint));
         }
+        typesetMath();
       } catch (error) {
         content.innerHTML = `<div class="error-state">${escapeHtml(error.message || error)}</div>`;
       }
     }
 
     function renderCheckpoint(payload) {
-      document.title = `${payload.metadata.title} — Checkpoint Viewer`;
+      document.title = `${payload.metadata.title_text ?? payload.metadata.title} — Checkpoint Viewer`;
       content.innerHTML = `<div class="markdown-body">${payload.html}</div>`;
       const body = content.querySelector(".markdown-body");
       const title = body.querySelector("h1");
       const meta = document.createElement("div");
       meta.className = "checkpoint-meta";
       const created = new Date(payload.metadata.created_at);
-      meta.innerHTML = `<span>${escapeHtml(created.toLocaleString("zh-CN"))}</span><span>${escapeHtml(payload.metadata.experiment_id || payload.metadata.id)}</span><span>${escapeHtml(payload.markdown_path)}</span>`;
-      const lead = document.createElement("div");
-      lead.className = "checkpoint-lead";
-      lead.innerHTML = `<strong>最重要结论</strong>${escapeHtml(payload.metadata.short_conclusion)}`;
-      if (title) title.after(meta, lead);
-      else body.prepend(meta, lead);
+      const propositionId = payload.metadata.proposition_id;
+      const chainLink = propositionId
+        ? `<span><a href="/propositions/${encodeURIComponent(propositionId)}">命题 ${escapeHtml(propositionId)} 的问题树</a></span>`
+        : "";
+      meta.innerHTML = `${chainLink}<span>${escapeHtml(created.toLocaleString("zh-CN"))}</span><span>${escapeHtml(payload.metadata.experiment_id || payload.metadata.id)}</span><span>${escapeHtml(payload.markdown_path)}</span>`;
+      if (title) title.after(meta);
+      else body.prepend(meta);
+      // Chained checkpoints open with the plugin-written reasoning summary; older notes get a conclusion lead.
+      if (!propositionId) {
+        const lead = document.createElement("div");
+        lead.className = "checkpoint-lead";
+        lead.innerHTML = `<strong>最重要结论</strong>${mathHtml(payload.metadata.short_conclusion_html, payload.metadata.short_conclusion)}`;
+        meta.after(lead);
+      }
+      collapseReproduction(body);
       renderToc(payload.toc);
       renderCharts(body);
       enhanceArtifactPreviews(body);
       body.querySelectorAll(".checkpoint-figure img").forEach(image => image.addEventListener("click", () => openImage(image)));
-      if (window.MathJax?.typesetPromise) window.MathJax.typesetPromise([body]).catch(() => {});
     }
 
     function renderToc(entries) {
@@ -421,7 +466,8 @@
       entries.forEach(entry => {
         const link = document.createElement("a");
         link.href = `#${entry.id}`;
-        link.textContent = entry.text;
+        // Wrap text so MathJax output stays in the first column of the side-nav grid.
+        link.append(Object.assign(document.createElement("span"), { textContent: entry.text }));
         if (entry.depth === 3) link.className = "subsection";
         tocNav.append(link);
       });
@@ -433,7 +479,7 @@
         const link = document.createElement("a");
         link.href = item.url;
         const label = document.createElement("span");
-        label.textContent = item.title;
+        label.innerHTML = mathHtml(item.title_html, item.title);
         const time = document.createElement("time");
         time.textContent = new Date(item.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
         link.append(label, time);
@@ -441,11 +487,104 @@
       });
     }
 
-    function renderHistory(history) {
+    function collapseReproduction(body) {
+      const heading = [...body.querySelectorAll("h2")].find(node => node.textContent.trim().startsWith("复现信息"));
+      if (!heading) return;
+      const details = document.createElement("details");
+      details.className = "reproduction-details";
+      const summary = document.createElement("summary");
+      summary.textContent = heading.textContent;
+      details.append(summary);
+      while (heading.nextSibling && heading.nextSibling.nodeName !== "H2") details.append(heading.nextSibling);
+      heading.replaceWith(details);
+    }
+
+    function verdictBadge(verdict) {
+      const labels = { supports: "支持", weakens: "削弱", refutes: "否定", inconclusive: "尚无定论" };
+      return verdict && labels[verdict]
+        ? `<span class="verdict verdict-${verdict}">${labels[verdict]}</span>`
+        : "";
+    }
+
+    function renderProposition(tree) {
+      const { proposition } = tree;
+      document.title = `命题 ${proposition.id} — Checkpoint Viewer`;
+      const checkpoints = new Map(tree.checkpoints.map(item => [item.id, item]));
+      const childQuestions = new Map();
+      const roots = [];
+      tree.questions.forEach(question => {
+        if (question.raised_by && checkpoints.has(question.raised_by)) {
+          if (!childQuestions.has(question.raised_by)) childQuestions.set(question.raised_by, []);
+          childQuestions.get(question.raised_by).push(question);
+        } else roots.push(question);
+      });
+      const renderQuestions = questions => {
+        const list = document.createElement("ol");
+        questions.forEach(question => {
+          const node = document.createElement("li");
+          node.className = `question-node ${question.status}`;
+          node.id = `question-${question.id}`;
+          node.innerHTML = `<div class="question-head"><span class="question-id">${escapeHtml(question.id)}</span>${mathHtml(question.question_html, question.question)}</div>`
+            + `<div class="question-origin">${mathHtml(question.origin_html, question.origin)}</div>`
+            + (question.status === "open" && question.proposed_experiment
+              ? `<div class="question-proposal">建议实验：${mathHtml(question.proposed_experiment_html, question.proposed_experiment)}</div>`
+              : "");
+          question.answered_by.map(id => checkpoints.get(id)).filter(Boolean).forEach(checkpoint => {
+            const item = document.createElement("div");
+            item.className = "checkpoint-node";
+            item.innerHTML = `<span class="checkpoint-seq">C${escapeHtml(checkpoint.sequence)}</span><a href="${escapeHtml(checkpoint.url)}">${mathHtml(checkpoint.title_html, checkpoint.title)}</a>${verdictBadge(checkpoint.verdict)}`
+              + `<div class="checkpoint-answer">${mathHtml(checkpoint.answer_html, checkpoint.answer)}</div>`;
+            const children = childQuestions.get(checkpoint.id);
+            if (children?.length) item.append(renderQuestions(children));
+            node.append(item);
+          });
+          list.append(node);
+        });
+        return list;
+      };
+
+      content.replaceChildren();
+      const header = document.createElement("header");
+      header.className = "history-header";
+      const answered = tree.questions.filter(question => question.status === "answered").length;
+      header.innerHTML = `<h1>命题 ${escapeHtml(proposition.id)}</h1>`
+        + `<p class="proposition-statement">${mathHtml(proposition.statement_html, proposition.statement)}</p>`
+        + (proposition.background ? `<p class="proposition-background">${mathHtml(proposition.background_html, proposition.background)}</p>` : "")
+        + `<p>${tree.questions.length} 个问题 · ${answered} 个已回答 · ${tree.checkpoints.length} 篇 checkpoint</p>`;
+      content.append(header);
+      const questionTree = renderQuestions(roots);
+      questionTree.className = "question-tree";
+      content.append(questionTree);
+      if (proposition.revisions?.length) {
+        const section = document.createElement("section");
+        section.className = "history-group";
+        section.innerHTML = "<h2>命题修订记录</h2>";
+        const list = document.createElement("ul");
+        list.className = "revision-list";
+        proposition.revisions.forEach(revision => {
+          const item = document.createElement("li");
+          item.innerHTML = `${escapeHtml(revision.at.slice(0, 10))}：${mathHtml(revision.previous_html, revision.previous)} → ${mathHtml(revision.statement_html, revision.statement)}（${mathHtml(revision.reason_html, revision.reason)}）`;
+          list.append(item);
+        });
+        section.append(list);
+        content.append(section);
+      }
+
+      tocHeading.textContent = "Open questions";
+      tocNav.replaceChildren();
+      tree.questions.filter(question => question.status === "open").forEach(question => {
+        const link = document.createElement("a");
+        link.href = `#question-${question.id}`;
+        link.innerHTML = `<span>${escapeHtml(question.id)} ${mathHtml(question.question_html, question.question)}</span>`;
+        tocNav.append(link);
+      });
+    }
+
+    function renderHistory(history, propositions = []) {
       document.title = "Checkpoint History — Checkpoint Viewer";
       tocHeading.textContent = "History";
       tocNav.replaceChildren();
-      if (!history.length) {
+      if (!history.length && !propositions.length) {
         content.innerHTML = '<div class="empty-state">当前项目还没有 checkpoint。</div>';
         return;
       }
@@ -460,6 +599,27 @@
       header.className = "history-header";
       header.innerHTML = `<h1>Checkpoint History</h1><p>${history.length} 篇项目研究记录；最新内容始终位于 <a href="/latest">/latest</a>。</p>`;
       content.append(header);
+      if (propositions.length) {
+        const section = document.createElement("section");
+        section.className = "history-group";
+        section.append(Object.assign(document.createElement("h2"), { textContent: "研究命题" }));
+        const list = document.createElement("ol");
+        list.className = "proposition-list";
+        propositions.forEach(item => {
+          const row = document.createElement("li");
+          row.className = "proposition-item";
+          const link = document.createElement("a");
+          link.href = item.url;
+          link.innerHTML = `${escapeHtml(item.id)}　${mathHtml(item.statement_html, item.statement)}`;
+          const stats = document.createElement("div");
+          stats.className = "proposition-stats";
+          stats.innerHTML = `${item.checkpoints} 篇 checkpoint · ${item.open_questions}/${item.questions} 个问题待验证${item.latest_answer ? ` · 最新：${mathHtml(item.latest_answer_html, item.latest_answer)}` : ""}`;
+          row.append(link, stats);
+          list.append(row);
+        });
+        section.append(list);
+        content.append(section);
+      }
       groups.forEach((items, date) => {
         const section = document.createElement("section");
         section.className = "history-group";
@@ -476,10 +636,10 @@
           const link = document.createElement("a");
           link.className = "history-title";
           link.href = item.url;
-          link.textContent = item.title;
+          link.innerHTML = mathHtml(item.title_html, item.title);
           const conclusion = document.createElement("div");
           conclusion.className = "history-conclusion";
-          conclusion.textContent = item.short_conclusion;
+          conclusion.innerHTML = mathHtml(item.short_conclusion_html, item.short_conclusion);
           text.append(link, conclusion);
           row.append(time, text);
           list.append(row);

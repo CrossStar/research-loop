@@ -31,6 +31,9 @@ extension.default({
 assert.equal(commands.includes("checkpoint-viewer"), true);
 assert.equal(commands.includes("artifacts"), true);
 assert.equal(tools.includes("research_checkpoint"), true);
+assert.equal(tools.includes("research_proposition"), true);
+assert.equal(commands.includes("proposition"), true);
+assert.equal(lifecycleHandlers.has("agent_settled"), true);
 
 const stateEntry = {
   id: "state",

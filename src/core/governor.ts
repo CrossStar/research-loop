@@ -18,19 +18,22 @@ const BROAD_LINT_PATTERN = /^\s*(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:lint|format)\s
 const REPRO_MANIFEST_PATTERN = /\b(?:pip\s+freeze|conda\s+env\s+export|npm\s+shrinkwrap)\b/i;
 const REPRODUCTION_INTENT =
   /\b(?:please\s+)?(?:reproduce|replicate)\b|\b(?:run|execute)\b.{0,30}\b(?:official experiment|reference protocol|paper result|baseline)\b|(?:请|帮我|开始|继续|重新|运行|执行).{0,20}(?:复现|官方实验|论文实验|基准实验)/i;
-const REPRODUCTION_META_DISCUSSION =
-  /\b(?:analy[sz]e|explain|discuss|review|policy|guard)\b.{0,50}\b(?:reproduc|replicat)|(?:分析|解释|讨论|修正|规则|策略|插件).{0,40}(?:复现|官方实验)|(?:复现|官方实验).{0,40}(?:问题|事故|坑|规则|策略)/i;
 const EXPLICIT_DIAGNOSTIC_REJECTION =
   /\b(?:do not|don't|never|without)\b.{0,30}\b(?:diagnostic|smoke test|small[- ]sample|subset)\b|(?:不要|禁止|不能|不允许).{0,20}(?:小样本|子集|抽样|缩小)/i;
 const EXPLICIT_DIAGNOSTIC_AUTHORIZATION =
   /\b(?:use|run|allow|approve|perform|start with)\b.{0,30}\b(?:diagnostic|smoke test|small[- ]sample|reduced subset|quick subset)\b|(?:允许|可以|先|只用|使用).{0,20}(?:小样本|子集|抽样|\d+\s*(?:条|个)?样本)/i;
 const SAMPLE_SCOPE_REDUCTION =
-  /--(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*(?:=|\s)\s*\d+|\b(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|sample[_-]?count|dataset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*[:=]\s*\d+|\bhead\s+-n\s+\d+|\.select\s*\(\s*range\s*\(\s*\d+|\.take\s*\(\s*\d+|\[\s*:\s*\d+\s*\]/i;
+  /--(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*(?:=|\s)\s*\d+|\b(?:max[_-]?(?:train[_-]?|eval[_-]?)?samples?|num[_-]?samples?|data[_-]?limit|subset[_-]?size|sample[_-]?count|dataset[_-]?size|max[_-]?steps|num[_-]?seeds?|repeats?)\s*[:=]\s*\d+|\bhead\s+-n\s+\d+[^|\n]*>|\.select\s*\(\s*range\s*\(\s*\d+|\.take\s*\(\s*\d+|\b(?:data|dataset|ds|samples|examples|records|rows|train|test|eval|val|valid|split|seeds)\w*\s*\[\s*:\s*\d+\s*\]/i;
 
-export function evaluateResearchFidelity(toolName: string, input: unknown, userPrompt: string): GateDecision {
+/** Guards declared reproductions against unapproved scope reductions; other intents are not reproductions. */
+export function evaluateResearchFidelity(
+  toolName: string,
+  input: unknown,
+  userPrompt: string,
+  experiment?: ExperimentContext,
+): GateDecision {
   if (
-    !REPRODUCTION_INTENT.test(userPrompt)
-    || REPRODUCTION_META_DISCUSSION.test(userPrompt)
+    experiment?.intent !== "reproduction"
     || (!EXPLICIT_DIAGNOSTIC_REJECTION.test(userPrompt) && EXPLICIT_DIAGNOSTIC_AUTHORIZATION.test(userPrompt))
   ) {
     return { block: false };
@@ -99,7 +102,9 @@ function experimentGuidance(experiment?: ExperimentContext): string {
   const details = experiment
     ? [
         `Title: ${experiment.title}`,
-        `Question: ${experiment.question}`,
+        `Question${experiment.questionId ? ` ${experiment.questionId}` : ""}: ${experiment.question}`,
+        ...(experiment.rationale ? [`Rationale: ${experiment.rationale}`] : []),
+        ...(experiment.predictions ?? []).map((prediction, index) => `Prediction ${index + 1}: if ${prediction.observation}, then ${prediction.implication}`),
         `Intent: ${experiment.intent}`,
         `Planned data: ${experiment.plannedDataScope}`,
         ...(experiment.reference ? [`Reference: ${experiment.reference}`] : []),
@@ -114,16 +119,21 @@ function experimentGuidance(experiment?: ExperimentContext): string {
 
 export function researchPolicy(
   mode: WorkMode,
-  _actions: number,
-  _softReview: boolean,
+  actions: number,
+  softReview: boolean,
   objective?: string,
   experiment?: ExperimentContext,
 ): string {
   const guidance = mode === "experiment" ? experimentGuidance(experiment) : MODE_GUIDANCE[mode];
+  const review = mode === "experiment" && softReview
+    ? `[SOFT REVIEW] ${actions} actions have run in this experiment. Before the next action, check whether the evidence already answers the question. If it does, finish with research_checkpoint now so the user can calibrate; otherwise take only the step that most directly answers it.`
+    : undefined;
   return [
     `[RESEARCH LOOP: ${mode.toUpperCase()}]`,
     ...(objective ? [`Objective: ${objective}`] : []),
     guidance,
+    ...(review ? [review] : []),
     "Start with the work or findings. Do not narrate Research Loop or mode changes unless the user needs to make a decision.",
+    "Write every mathematical expression as LaTeX, inline $...$ and display $$...$$, in replies and in every research tool field, including propositions, questions, predictions and checkpoint titles and answers. Research Loop renders it in the Viewer and converts it for the terminal.",
   ].join("\n");
 }

@@ -19,8 +19,9 @@ export function renderPiResearchStatus(
   snapshot: ResearchCoreSnapshot,
   theme: PiStatusTheme,
   userDecisionPending = false,
+  nextQuestionId?: string,
 ): string {
-  const projection = projectPiStatus(snapshot, userDecisionPending);
+  const projection = projectPiStatus(snapshot, userDecisionPending, nextQuestionId);
   const marker = theme.fg(projection.tone, projection.marker);
   const research = theme.fg(projection.enabled ? "accent" : "dim", "research");
   const mode = theme.fg(projection.tone, projection.mode);
@@ -33,6 +34,7 @@ export function renderPiResearchStatus(
 export function projectPiStatus(
   snapshot: ResearchCoreSnapshot,
   userDecisionPending = false,
+  nextQuestionId?: string,
 ): PiStatusProjection {
   if (!snapshot.state.enabled) {
     return { marker: "◇", mode: "off", details: [], tone: "dim", enabled: false };
@@ -51,7 +53,7 @@ export function projectPiStatus(
   const projection: PiStatusProjection = {
     marker: mode === "experiment" ? "◆" : "◇",
     mode,
-    details: modeDetails(snapshot),
+    details: [...propositionDetails(snapshot, nextQuestionId), ...modeDetails(snapshot)],
     tone: modeTone(mode),
     enabled: true,
   };
@@ -64,6 +66,15 @@ export function projectPiStatus(
     projection.details.push("waiting for decision");
   }
   return projection;
+}
+
+function propositionDetails(snapshot: ResearchCoreSnapshot, nextQuestionId?: string): string[] {
+  const propositionId = snapshot.state.propositionId;
+  if (!propositionId) return snapshot.state.enabled ? ["no proposition"] : [];
+  const questionId = snapshot.state.workMode === "experiment"
+    ? snapshot.state.experiment?.questionId
+    : nextQuestionId && `next ${nextQuestionId}`;
+  return [questionId ? `${propositionId} ${questionId}` : propositionId];
 }
 
 function modeDetails(snapshot: ResearchCoreSnapshot): string[] {

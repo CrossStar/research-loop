@@ -25,9 +25,28 @@ try {
   let tool;
   const pi = { registerTool(value) { tool = value; } };
   let reached;
+  let chainError;
+  const chain = {
+    proposition: { id: "P1", statement: "持久化记录能让研究者追踪论证" },
+    question: { id: "Q2", question: "Markdown writer 能否保存 checkpoint？", origin: "C1 发现 Viewer 依赖文件记录。" },
+    path: [{ questionId: "Q1", via: { sequence: 1, answer: "Viewer 读取文件。" } }, { questionId: "Q2" }],
+    raisedBy: { sequence: 1, title: "Viewer 读取文件记录" },
+    predictions: [
+      { observation: "文件被写入", implication: "writer 可用" },
+      { observation: "文件缺失", implication: "writer 不可用" },
+    ],
+    sequence: 2,
+    newQuestionIds: ["Q5"],
+  };
   registerResearchCheckpoint(pi, {
     getArtifacts: () => [],
-    async save(draft, artifacts) {
+    async prepareChain(newQuestionCount) {
+      if (chainError) return chainError;
+      assert.equal(newQuestionCount, 1);
+      return chain;
+    },
+    async save(draft, artifacts, savedChain) {
+      assert.equal(savedChain, chain);
       assert.equal(draft.title, "持久化 Markdown 正常生成");
       assert.equal(artifacts.length, 1);
       assert.equal(artifacts[0].artifact.path, "results/run.log");
@@ -38,7 +57,7 @@ try {
             id: "checkpoint-test",
             title: draft.title,
             created_at: new Date().toISOString(),
-            short_conclusion: draft.shortConclusion,
+            short_conclusion: draft.answer,
             artifact_paths: [],
           },
           directory,
@@ -48,9 +67,11 @@ try {
         viewerUrl: "http://127.0.0.1:43119/latest",
       };
     },
-    onReached(resultCount) { reached = resultCount; },
+    onReached({ resultCount }) { reached = resultCount; },
   });
   assert.equal(tool.name, "research_checkpoint");
+  assert.equal(tool.promptGuidelines.some((line) => /as LaTeX in every field/.test(line)), true);
+  assert.equal(tool.promptGuidelines.some((line) => /show the key comparison as a table or figure/.test(line)), true);
   const notifications = [];
   const context = {
     cwd: directory,
@@ -59,11 +80,28 @@ try {
   const params = {
     title: "持久化 Markdown 正常生成",
     experimentId: "smoke-1",
-    shortConclusion: "Viewer 始终读取项目中的最新研究记录。",
-    purposeMarkdown: "此前缺少持久化研究记录。本次检查 Markdown writer。",
-    setupMarkdown: "使用合成输入检查四段正文。",
-    resultsMarkdown: "最重要的结果是 checkpoint 已保存。",
-    conclusionMarkdown: "实现支持持久化记录，下一步检查浏览器。",
+    answer: "Viewer 始终读取项目中的最新研究记录。",
+    verdict: "supports",
+    verdictReason: "文件已写入并可被发现。",
+    whyMarkdown: "此前缺少持久化研究记录。本次检查 Markdown writer。",
+    dataset: { name: "合成输入", reason: "只检查 writer。", description: "一条合成日志。" },
+    keyHyperparameters: [{ name: "epochs", value: "1", reason: "只需一次写入。" }],
+    designMarkdown: "使用合成输入检查各段正文。",
+    observationsMarkdown: "最重要的结果是 checkpoint 已保存。",
+    predictionOutcomes: [
+      { outcome: "observed", note: "checkpoint.md 已存在。" },
+      { outcome: "not-observed", note: "没有缺失文件。" },
+    ],
+    judgmentMarkdown: "实现支持持久化记录。",
+    newQuestions: [{
+      question: "浏览器能否渲染问题树？",
+      whyItArose: "文件已写入，但尚未检查浏览器显示。",
+      proposedExperiment: "启动 Viewer 并打开命题页。",
+      predictions: [
+        { observation: "问题树显示", implication: "链条可读" },
+        { observation: "问题树为空", implication: "链接字段缺失" },
+      ],
+    }],
     protocols: [{ title: "smoke", intent: "diagnostic", dataScope: "synthetic", sources: [], deviations: [] }],
     reproduction: {
       model: "not-applicable",
@@ -97,11 +135,25 @@ try {
   assert.equal(unsafe.isError, true);
   assert.match(unsafe.content[0].text, /must stay inside the project/);
 
+  chainError = "Proposition P1 was not found under checkpoints/propositions.";
+  const unchained = await tool.execute("call-unchained", params, undefined, undefined, context);
+  assert.equal(unchained.isError, true);
+  assert.match(unchained.content[0].text, /P1 was not found/);
+  chainError = undefined;
+  const miscounted = await tool.execute("call-miscounted", {
+    ...params,
+    predictionOutcomes: params.predictionOutcomes.slice(0, 1),
+  }, undefined, undefined, context);
+  assert.equal(miscounted.isError, true);
+  assert.match(miscounted.content[0].text, /逐条对应/);
+
   const result = await tool.execute("call-1", params, undefined, undefined, context);
   assert.equal(result.terminate, true);
   assert.equal(reached, 1);
   const text = result.content[0].text;
-  assert.match(text, /✓ Experiment completed/);
+  assert.match(text, /✓ C2 answered Q2/);
+  assert.match(text, /Proposition P1: 支持/);
+  assert.match(text, /Q5 浏览器能否渲染问题树？/);
   assert.match(text, /Saved: checkpoints\/checkpoint-test\/checkpoint\.md/);
   assert.match(text, /http:\/\/127\.0\.0\.1:43119\/latest/);
   assert.match(text, /-L 43119:127\.0\.0\.1:43119/);

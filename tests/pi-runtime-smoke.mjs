@@ -67,9 +67,11 @@ assert.deepEqual(statusCalls.at(-1), { id: "research-loop", value: "◇ research
 runtime.setEnabled(true, ctx);
 assert.deepEqual(statusCalls.at(-1), {
   id: "research-loop",
-  value: "◇ research  exploration · read only",
+  value: "◇ research  exploration · no proposition · read only",
 });
 assert.equal(activeTools.includes("research_mode"), true);
+assert.equal(activeTools.includes("research_proposition"), true);
+assert.equal(activeTools.includes("research_checkpoint"), false);
 assert.equal(activeTools.includes("ask_user_question"), true);
 assert.match(runtime.policy(), /ask_user_question is available/);
 assert.doesNotMatch(runtime.policy(), /\[EXPERIMENT CODE\]/);
@@ -106,13 +108,13 @@ runtime.setUserDecisionPending(false, ctx);
 await runtime.evaluateToolCall("read", { path: "README.md" }, ctx);
 assert.deepEqual(statusCalls.at(-1), {
   id: "research-loop",
-  value: "◇ research  exploration · read only",
+  value: "◇ research  exploration · no proposition · read only",
 });
 
 runtime.enterMode("brainstorming", "Compare implementation paths", undefined, ctx);
 assert.deepEqual(statusCalls.at(-1), {
   id: "research-loop",
-  value: "◇ research  brainstorming · read only",
+  value: "◇ research  brainstorming · no proposition · read only",
 });
 
 const firstBlockedWrite = await runtime.evaluateToolCall("write", { path: "notes.md" }, ctx);
@@ -128,13 +130,27 @@ const retriedAfterUserRequest = await runtime.evaluateToolCall("write", { path: 
 assert.equal(retriedAfterUserRequest?.block, true);
 assert.equal(abortCount, 1);
 
+runtime.setProposition("P1", ctx);
+assert.equal(entries.at(-1).data.propositionId, "P1");
+runtime.setPropositionContext("[RESEARCH PROPOSITION]\nActive proposition P1: synthetic");
+runtime.selectNextQuestion("Q1", ctx);
+assert.match(statusCalls.at(-1).value, /P1 next Q1/);
 runtime.enterMode("experiment", "Run a scheduled evaluation", {
   title: "Scheduled evaluation",
+  questionId: "Q1",
   question: "Does the official model reproduce the expected result?",
+  predictions: [
+    { observation: "the metric improves", implication: "the question is answered positively" },
+    { observation: "the metric does not improve", implication: "the question is answered negatively" },
+  ],
   intent: "diagnostic",
   plannedDataScope: "official evaluation split",
 }, ctx);
+assert.equal(runtime.selectedNextQuestionId, undefined);
+assert.equal(activeTools.includes("research_proposition"), false);
+assert.equal(activeTools.includes("research_checkpoint"), true);
 const experimentPolicy = runtime.policy();
+assert.match(experimentPolicy, /Active proposition P1/);
 assert.match(experimentPolicy, /\[EXPERIMENT CODE\]/);
 assert.match(experimentPolicy, /top-level main\(\) mirror the natural experiment phases/);
 assert.match(experimentPolicy, /must use Rich/);
